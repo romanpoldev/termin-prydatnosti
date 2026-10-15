@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f6f5c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Термін">
+  <title>Термін придатності</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-btn" id="btnBack" hidden aria-label="Назад">‹</button>
+    <h1 id="title">Термін придатності</h1>
+    <span class="net" id="netBadge" title="Стан звʼязку"></span>
+    <button class="icon-btn" id="btnSettings" hidden aria-label="Налаштування">⚙</button>
+  </header>
+
+  <main>
+    <!-- Підключення до сервера -->
+    <section class="screen" id="scrSetup" hidden>
+      <p class="lead">Адреса сервера. Залиште поле порожнім, щоб використати стандартний сервер.</p>
+      <label class="field">Адреса сервера
+        <input id="setupUrl" type="url" placeholder="https://….supabase.co/functions/v1/api" autocomplete="off">
+      </label>
+      <button class="btn primary" id="btnSetupSave">Підключити</button>
+      <p class="hint" id="setupMsg"></p>
+    </section>
+
+    <!-- Вхід -->
+    <section class="screen" id="scrLogin" hidden>
+      <p class="lead">Введіть свій PIN-код</p>
+      <input id="pin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+      <button class="btn primary" id="btnLogin">Увійти</button>
+      <p class="hint error" id="loginMsg"></p>
+    </section>
+
+    <!-- Головна -->
+    <section class="screen" id="scrHome" hidden>
+      <p class="lead" id="hello"></p>
+      <button class="btn primary big" id="btnStart">📦 Почати приймання</button>
+      <button class="btn big" id="btnContinue" hidden>↩ Продовжити приймання</button>
+      <div class="card muted" id="queueCard" hidden>
+        <span id="queueText"></span>
+        <button class="btn small" id="btnFlush">Надіслати зараз</button>
+      </div>
+      <button class="btn big" id="btnCalendar">📅 Календар термінів</button>
+      <button class="btn big" id="btnInvoices">🧾 Накладні</button>
+      <p class="hint">Інвентаризація зʼявиться в наступному етапі.</p>
+    </section>
+
+    <!-- Календар термінів: місяці -->
+    <section class="screen" id="scrCalendar" hidden>
+      <div class="cal-bar">
+        <span class="small-text" id="calStamp"></span>
+        <button class="btn small" id="btnCalRefresh">↻ Оновити</button>
+      </div>
+      <div id="calAlerts"></div>
+      <div id="calMonths"></div>
+      <p class="hint" id="calMsg"></p>
+    </section>
+
+    <!-- Календар термінів: товари місяця -->
+    <section class="screen" id="scrMonth" hidden>
+      <p class="small-text" id="monthSummary"></p>
+      <div id="monthList"></div>
+    </section>
+
+    <!-- Накладні: поставки за останні дні -->
+    <section class="screen" id="scrInvoices" hidden>
+      <div class="cal-bar">
+        <span class="small-text" id="invListSub"></span>
+        <button class="btn small" id="btnInvListRefresh">↻ Оновити</button>
+      </div>
+      <div id="invList"></div>
+      <p class="hint" id="invListMsg"></p>
+    </section>
+
+    <!-- Накладна поставки: фото сторінок і звірка -->
+    <section class="screen" id="scrInvoice" hidden>
+      <div class="status ok" id="invDone" hidden></div>
+      <div class="card">
+        <div class="item-name" id="invTitle"></div>
+        <div class="small-text" id="invSub"></div>
+      </div>
+      <div id="invPages"></div>
+      <button class="btn primary" id="btnInvPhoto">📷 Сфотографувати накладну</button>
+      <p class="hint" id="invPhotoHint">Покладіть аркуш рівно, без тіней, щоб уся таблиця була в кадрі. Кожна сторінка — окреме фото.</p>
+      <div class="status" id="invStatus" hidden></div>
+      <button class="btn" id="btnInvCheck" hidden>🔍 Звірити з прийнятим</button>
+      <div id="invRecon"></div>
+    </section>
+
+    <!-- Початок сесії -->
+    <section class="screen" id="scrSession" hidden>
+      <p class="lead">Від кого поставка?</p>
+      <div class="chips" id="supplierList"></div>
+      <label class="field">Або впишіть постачальника
+        <input id="supplierInput" type="text" autocomplete="off">
+      </label>
+      <button class="btn primary" id="btnSessionGo">Почати</button>
+    </section>
+
+    <!-- Приймання -->
+    <section class="screen" id="scrScan" hidden>
+      <div class="session-bar">
+        <span id="sessionInfo"></span>
+        <button class="btn small" id="btnFinish">🏁 Завершити</button>
+      </div>
+
+      <div id="scanBox">
+        <div id="reader"></div>
+        <div class="row">
+          <input id="manualCode" type="text" inputmode="numeric" placeholder="або введіть штрих-код" autocomplete="off">
+          <button class="btn" id="btnManualCode">OK</button>
+        </div>
+        <p class="hint error" id="cameraMsg"></p>
+      </div>
+
+      <!-- Картка товару -->
+      <div class="card" id="itemCard" hidden>
+        <div class="item-head">
+          <div>
+            <div class="code" id="itemCode"></div>
+            <div class="item-name" id="itemNameView"></div>
+          </div>
+          <button class="icon-btn" id="btnCancelItem" aria-label="Скасувати">✕</button>
+        </div>
+
+        <div id="newProduct" hidden>
+          <p class="hint" id="newProductHint">Новий товар. Сфотографуйте лицьову сторону — назву сформує ШІ.</p>
+          <button class="btn" id="btnNamePhoto">📷 Фото товару</button>
+          <div class="status" id="nameStatus" hidden></div>
+          <label class="field">Назва
+            <input id="nameInput" type="text" autocomplete="off">
+          </label>
+          <label class="field">Категорія
+            <select id="categorySelect"></select>
+          </label>
+        </div>
+
+        <div id="entries"></div>
+        <button class="btn" id="btnAddEntry">➕ Ще одна дата цього товару</button>
+        <button class="btn primary" id="btnSaveItem" disabled>Зберегти</button>
+        <p class="hint error" id="itemMsg"></p>
+      </div>
+
+      <h2 class="list-title" id="listTitle" hidden>Прийнято в цій поставці</h2>
+      <ul class="items" id="sessionItems"></ul>
+    </section>
+
+    <!-- Налаштування -->
+    <section class="screen" id="scrSettings" hidden>
+      <div class="card">
+        <div><b>Працівник:</b> <span id="setUser"></span></div>
+        <div class="small-text"><b>Сервер:</b> <span id="setUrl" class="break"></span></div>
+        <div class="small-text"><b>Версія:</b> <span id="setVersion"></span></div>
+      </div>
+      <div class="card">
+        <div><b>🧪 Порівняти моделі ШІ</b></div>
+        <p class="hint">Сфотографуйте дату на упаковці — сервер надішле фото в кілька моделей і покаже, що прочитала кожна, за скільки секунд і скільки це коштує.</p>
+        <button class="btn" id="btnCompare">📷 Фото дати для порівняння</button>
+        <div id="compareOut"></div>
+      </div>
+      <button class="btn" id="btnChangeUrl">Змінити адресу сервера</button>
+      <button class="btn" id="btnRefresh">Оновити довідники</button>
+      <button class="btn danger" id="btnLogout">Вийти</button>
+    </section>
+  </main>
+
+  <input type="file" id="fileInput" accept="image/*" capture="environment" hidden>
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="js/dates.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
