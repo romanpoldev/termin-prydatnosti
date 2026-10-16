@@ -42,6 +42,7 @@
     <!-- Головна -->
     <section class="screen" id="scrHome" hidden>
       <p class="lead" id="hello"></p>
+      <div class="status warn" id="homeInvNote" hidden></div>
       <button class="btn primary big" id="btnStart">📦 Почати приймання</button>
       <button class="btn big" id="btnContinue" hidden>↩ Продовжити приймання</button>
       <div class="card muted" id="queueCard" hidden>
@@ -50,7 +51,8 @@
       </div>
       <button class="btn big" id="btnCalendar">📅 Календар термінів</button>
       <button class="btn big" id="btnInvoices">🧾 Накладні</button>
-      <p class="hint">Інвентаризація зʼявиться в наступному етапі.</p>
+      <button class="btn big" id="btnInventory">📋 Інвентаризація</button>
+      <p class="hint" id="noArticleNote" hidden></p>
     </section>
 
     <!-- Календар термінів: місяці -->
@@ -93,6 +95,37 @@
       <div class="status" id="invStatus" hidden></div>
       <button class="btn" id="btnInvCheck" hidden>🔍 Звірити з прийнятим</button>
       <div id="invRecon"></div>
+    </section>
+
+    <!-- Інвентаризація: початок і список -->
+    <section class="screen" id="scrInventory" hidden>
+      <button class="btn primary big" id="btnInvContinue" hidden>↩ Продовжити підрахунок</button>
+      <div id="invOpenOther"></div>
+      <div class="card" id="invNewCard">
+        <div><b>Нова інвентаризація</b></div>
+        <p class="hint" id="invNewHint">Оберіть, що рахуємо. Поки триває інвентаризація, приймання на цьому телефоні вимкнено.</p>
+        <button class="btn mode-btn" data-mode="qty"><b>🔢 Тільки кількість</b><span>Скан → кількість → далі. Залишки партій у базі не змінюються.</span></button>
+        <button class="btn mode-btn" data-mode="dates"><b>📅 Кількість + дати</b><span>Видно партії з бази — вводите фактичну кількість по кожній даті. Після завершення залишки в календарі стануть фактичними.</span></button>
+      </div>
+      <div class="cal-bar">
+        <h2 class="list-title">Останні інвентаризації</h2>
+        <button class="btn small" id="btnInvHistRefresh">↻ Оновити</button>
+      </div>
+      <div id="invHist"></div>
+      <p class="hint" id="invHistMsg"></p>
+    </section>
+
+    <!-- Інвентаризація: звіт, завершення, файли -->
+    <section class="screen" id="scrInvReport" hidden>
+      <div class="card">
+        <div class="item-name" id="irTitle"></div>
+        <div class="small-text" id="irSub"></div>
+        <div class="recon-sum" id="irBadges"></div>
+      </div>
+      <div class="status" id="irStatus" hidden></div>
+      <div id="irActions"></div>
+      <div id="irFiles"></div>
+      <div id="irLists"></div>
     </section>
 
     <!-- Початок сесії -->
@@ -143,8 +176,16 @@
           </label>
         </div>
 
+        <div id="invCounted" hidden></div>
+        <div id="invBatches" hidden></div>
+        <label class="field" id="invQtyField" hidden>Кількість, шт
+          <input id="invQty" type="number" inputmode="numeric" min="0" step="1">
+        </label>
         <div id="entries"></div>
         <button class="btn" id="btnAddEntry">➕ Ще одна дата цього товару</button>
+        <label class="field" id="articleField" hidden>Артикул (необовʼязково)
+          <input id="articleInput" type="text" autocomplete="off">
+        </label>
         <button class="btn primary" id="btnSaveItem" disabled>Зберегти</button>
         <p class="hint error" id="itemMsg"></p>
       </div>
@@ -166,6 +207,12 @@
         <button class="btn" id="btnCompare">📷 Фото дати для порівняння</button>
         <div id="compareOut"></div>
       </div>
+      <div class="card">
+        <div><b>📥 Імпорт довідника з офісу</b></div>
+        <p class="hint">Файл Excel (.xlsx) або CSV зі штрих-кодами, артикулами й назвами. Товари зіставляються за штрих-кодом; спершу буде перевірка, без змін у базі.</p>
+        <button class="btn" id="btnCatFile">📄 Обрати файл</button>
+        <div id="catOut"></div>
+      </div>
       <button class="btn" id="btnChangeUrl">Змінити адресу сервера</button>
       <button class="btn" id="btnRefresh">Оновити довідники</button>
       <button class="btn danger" id="btnLogout">Вийти</button>
@@ -173,6 +220,7 @@
   </main>
 
   <input type="file" id="fileInput" accept="image/*" capture="environment" hidden>
+  <input type="file" id="catFileInput" accept=".xlsx,.xls,.csv,text/csv" hidden>
   <div class="toast" id="toast" hidden></div>
 
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>

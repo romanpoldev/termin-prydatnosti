@@ -145,6 +145,7 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
   position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 16px);
   max-width: 528px; margin: 0 auto; z-index: 20;
   background: var(--text); color: var(--bg); padding: 12px 16px; border-radius: 10px; font-size: 15px;
+  pointer-events: none; /* не перекриває кнопку «Зберегти» під собою */
 }
 
 .spinner {
@@ -231,3 +232,18 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
 .check-row .was { font-size: 13px; color: var(--muted); text-decoration: line-through; }
 details.recon-ok summary { cursor: pointer; font-weight: 600; color: var(--ok); padding: 6px 0; }
 details.recon-ok ul { margin-top: 6px; }
+
+/* Інвентаризація */
+.mode-btn { display: flex; flex-direction: column; gap: 4px; text-align: left; }
+.mode-btn span { font-size: 14px; font-weight: 400; color: var(--muted); }
+.batch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+}
+.batch-row input { width: 96px; flex: none; text-align: center; }
+#invBatches { display: flex; flex-direction: column; gap: 8px; }
+#invCounted { display: flex; flex-direction: column; gap: 8px; }
+.muted-text { color: var(--muted); }
+a.btn { text-decoration: none; box-sizing: border-box; }
+#irActions, #irFiles, #irLists, #invOpenOther, #invHist, #catOut { display: flex; flex-direction: column; gap: 8px; }
+.cal-bar .list-title { margin: 0; }

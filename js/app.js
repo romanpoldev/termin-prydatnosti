@@ -1,8 +1,8 @@
-/* Сторінка приймання товару: вхід за PIN, сесія поставки, сканування, фото дати, черга без інтернету. */
+/* Сторінка: вхід за PIN, приймання поставки, календар термінів, накладні, інвентаризація, черга без інтернету. */
 (function () {
   'use strict';
 
-  var APP_VERSION = '3.0.0';
+  var APP_VERSION = '4.0.0';
   // Сервер за замовчуванням (Supabase). Інший можна задати в налаштуваннях або посиланням ?api=
   var DEFAULT_API = 'https://zsxwxaosspbjltmvdtpc.supabase.co/functions/v1/api';
   var API_RE = /^https:\/\/([a-z0-9-]+\.supabase\.co\/functions\/v1\/|script\.google(usercontent)?\.com\/).+/;
@@ -38,6 +38,10 @@
     user: LS.get('user', null),           // { name, pin }
     data: LS.get('data', { suppliers: [], categories: [], products: {} }),
     session: LS.get('session', null),     // { id, supplier, startedAt, items: [] }
+    inventory: LS.get('inventory', null), // інвентаризація на цьому телефоні: { id, mode, startedAt, items: [] }
+    openInventories: LS.get('openInv', []),  // відкриті інвентаризації на сервері (з bootstrap)
+    inventoryReady: LS.get('invReady', true),
+    noArticle: null,
     item: null,                           // товар, який зараз приймаємо
     scanner: null,
     scanning: false,
@@ -49,7 +53,14 @@
 
   function uuid() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-    return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    // Старі браузери (iOS до 15.4) і сторінка без https: UUID v4 вручну — сервер приймає лише справжні UUID.
+    var b = new Uint8Array(16);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(b);
+    else for (var i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    var h = Array.prototype.map.call(b, function (x) { return (x + 256).toString(16).slice(1); }).join('');
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
 
   function esc(s) {
@@ -180,6 +191,12 @@
   }
 
   function markSent(it) {
+    if (it.action === 'inventoryCount' && state.inventory) {
+      state.inventory.items.forEach(function (x) { if (x.id === it.payload.groupId) x.status = 'sent'; });
+      saveInventory();
+      renderSessionItems();
+      return;
+    }
     if (it.action !== 'saveItem' || !state.session) return;
     state.session.items.forEach(function (x) { if (x.id === it.payload.clientId) x.status = 'sent'; });
     saveSession();
@@ -200,7 +217,7 @@
   // Навігація
   // ---------------------------------------------------------------------------
   var SCREENS = ['scrSetup', 'scrLogin', 'scrHome', 'scrSession', 'scrScan', 'scrSettings', 'scrCalendar', 'scrMonth',
-    'scrInvoices', 'scrInvoice'];
+    'scrInvoices', 'scrInvoice', 'scrInventory', 'scrInvReport'];
   var current = '';
 
   function show(id, title) {
@@ -210,7 +227,8 @@
     $('title').textContent = title || 'Термін придатності';
     var loggedIn = !!state.user;
     $('btnSettings').hidden = !loggedIn || id === 'scrSettings' || id === 'scrSetup';
-    $('btnBack').hidden = ['scrSession', 'scrScan', 'scrSettings', 'scrCalendar', 'scrMonth', 'scrInvoices', 'scrInvoice'].indexOf(id) === -1 ||
+    $('btnBack').hidden = ['scrSession', 'scrScan', 'scrSettings', 'scrCalendar', 'scrMonth', 'scrInvoices', 'scrInvoice',
+      'scrInventory', 'scrInvReport'].indexOf(id) === -1 ||
       (id === 'scrSettings' && !loggedIn);
     window.scrollTo(0, 0);
   }
@@ -221,10 +239,12 @@
     $('hello').textContent = 'Вітаю, ' + state.user.name + '!';
     $('btnContinue').hidden = !state.session;
     $('btnStart').hidden = !!state.session;
+    $('btnStart').disabled = !!state.inventory;
     if (state.session) {
       $('btnContinue').textContent = '↩ Продовжити приймання (' + (state.session.supplier || 'без постачальника') +
         ', позицій: ' + state.session.items.length + ')';
     }
+    renderHomeInventory();
     updateNet();
     show('scrHome');
   }
@@ -282,7 +302,13 @@
     (r.products || []).forEach(function (p) { if (p.b) products[p.b] = { n: p.n, c: p.c }; });
     state.data = { suppliers: r.suppliers || [], categories: r.categories || [], products: products };
     state.serverVersion = r.version || '';
+    state.openInventories = r.openInventories || [];
+    state.inventoryReady = r.inventoryReady !== false;
+    state.noArticle = r.noArticle == null ? null : r.noArticle;
     LS.set('data', state.data);
+    LS.set('openInv', state.openInventories);
+    LS.set('invReady', state.inventoryReady);
+    if (current === 'scrHome') renderHomeInventory();
   }
 
   function refreshData(silent) {
@@ -303,6 +329,7 @@
 
   var chosenSupplier = '';
   $('btnStart').onclick = function () {
+    if (state.inventory) { toast('Триває інвентаризація — приймання вимкнено', 3500); return; }
     chosenSupplier = '';
     $('supplierInput').value = '';
     renderSuppliers();
@@ -340,14 +367,22 @@
   $('btnContinue').onclick = openScan;
 
   function openScan() {
-    $('sessionInfo').textContent = state.session.supplier;
+    var inv = state.inventory;
+    $('sessionInfo').textContent = inv ? 'Інвентаризація · ' + modeLabel(inv.mode) : state.session.supplier;
+    $('listTitle').textContent = inv ? 'Пораховано на цьому телефоні' : 'Прийнято в цій поставці';
     renderSessionItems();
     closeItem();
-    show('scrScan', 'Приймання');
+    show('scrScan', inv ? 'Інвентаризація' : 'Приймання');
   }
 
   $('btnFinish').onclick = function () {
     if (state.item && !confirm('Поточний товар не збережено. Все одно завершити?')) return;
+    if (state.inventory) {
+      // Інвентаризація: спершу звіт (не відскановано / нові), завершення — там.
+      state.item = null;
+      openInvReport(state.inventory.id, 'scan');
+      return;
+    }
     var n = state.session.items.length;
     if (!confirm('Завершити приймання? Позицій: ' + n)) return;
     var id = state.session.id;
@@ -363,6 +398,20 @@
 
   function renderSessionItems() {
     var ul = $('sessionItems');
+    if (state.inventory) {
+      var its = state.inventory.items;
+      $('listTitle').hidden = !its.length;
+      ul.innerHTML = its.slice().reverse().map(function (it) {
+        var det = it.dates && it.dates.length
+          ? it.dates.map(function (e) { return e.qty + ' шт до ' + Dates.format(e.date); }).join(' · ')
+          : it.qty + ' шт';
+        if (it.op === 'replace') det += ' · замінено попереднє';
+        return '<li><div><div>' + esc(it.name) + '</div><div class="dates">' + esc(det) + '</div></div>' +
+          '<span class="st" title="' + (it.status === 'sent' ? 'Збережено' : 'Чекає звʼязку') + '">' +
+          (it.status === 'sent' ? '✓' : '⏳') + '</span></li>';
+      }).join('');
+      return;
+    }
     var items = state.session ? state.session.items : [];
     $('listTitle').hidden = !items.length;
     ul.innerHTML = items.slice().reverse().map(function (it) {
@@ -448,20 +497,38 @@
 
   function openItem(barcode) {
     var known = state.data.products[barcode];
+    var inv = state.inventory;
     state.item = {
       id: uuid(), barcode: barcode, known: !!known,
       name: known ? known.n : '', nameSuggested: '', nameSource: known ? 'existing' : '',
       category: known ? known.c : '', productPhotoUrl: '',
-      entries: [newEntry()]
+      entries: inv ? [] : [newEntry()],
+      inv: !!inv, mode: inv ? inv.mode : '', op: 'add', qty: '', article: '', articleOrig: '',
+      batchRows: [], counted: null, ctxLoading: !!inv && navigator.onLine
     };
+    var item = state.item;
     $('scanBox').hidden = true;
     $('itemCard').hidden = false;
     $('itemMsg').textContent = '';
     $('itemCode').textContent = barcode;
+    $('invQty').value = '';
+    $('articleInput').value = '';
     renderItemHead();
 
-    var already = state.session.items.filter(function (x) { return x.barcode === barcode; });
-    if (already.length) toast('Цей товар уже є в поставці — буде додано ще одну позицію', 3500);
+    if (!inv) {
+      var already = state.session.items.filter(function (x) { return x.barcode === barcode; });
+      if (already.length) toast('Цей товар уже є в поставці — буде додано ще одну позицію', 3500);
+    } else {
+      if (!navigator.onLine) applyInvContext(item, null);
+      if (known && navigator.onLine) {
+        api('getProduct', { barcode: barcode, inventoryId: inv.id }).then(function (r) {
+          if (state.item !== item) return;
+          if (r.found) { item.name = r.product.n; item.article = item.articleOrig = r.product.a || ''; $('articleInput').value = item.article; }
+          renderItemHead();
+          applyInvContext(item, r);
+        }, function () { if (state.item === item) applyInvContext(item, null); });
+      }
+    }
 
     if (!known) {
       $('newProduct').hidden = false;
@@ -471,8 +538,12 @@
       renderCategories('');
       if (navigator.onLine) {
         $('newProductHint').innerHTML = '<span class="spinner"></span>Шукаю товар…';
-        api('getProduct', { barcode: barcode }).then(function (r) {
+        api('getProduct', inv ? { barcode: barcode, inventoryId: inv.id } : { barcode: barcode }).then(function (r) {
           if (!state.item || state.item.barcode !== barcode) return;
+          if (inv) {
+            if (r.found) { item.article = item.articleOrig = r.product.a || ''; $('articleInput').value = item.article; }
+            applyInvContext(item, r);
+          }
           if (r.found) {
             state.data.products[barcode] = { n: r.product.n, c: r.product.c };
             LS.set('data', state.data);
@@ -490,6 +561,7 @@
           updateSaveButton();
         }, function () {
           $('newProductHint').textContent = 'Новий товар. Сфотографуйте лицьову сторону або впишіть назву.';
+          if (inv && state.item === item) applyInvContext(item, null);
         });
       } else {
         $('newProductHint').textContent = 'Немає звʼязку. Впишіть назву товару вручну.';
@@ -497,6 +569,7 @@
     } else {
       $('newProduct').hidden = true;
     }
+    renderInvParts();
     renderEntries();
   }
 
@@ -606,8 +679,8 @@
   function renderEntry(e, idx, total) {
     var el = document.createElement('div');
     el.className = 'entry';
-    var html = '<div class="entry-head"><span>Дата ' + (idx + 1) + '</span>' +
-      (total > 1 ? '<button class="icon-btn" data-act="remove" aria-label="Прибрати">✕</button>' : '') + '</div>';
+    var html = '<div class="entry-head"><span>' + (state.item.inv ? 'Інша дата ' : 'Дата ') + (idx + 1) + '</span>' +
+      (total > 1 || state.item.inv ? '<button class="icon-btn" data-act="remove" aria-label="Прибрати">✕</button>' : '') + '</div>';
 
     var fd = finalDate(e);
     if (fd && !e.editing) {
@@ -723,6 +796,7 @@
   function updateSaveButton() {
     var it = state.item;
     if (!it) return;
+    if (it.inv) { $('btnSaveItem').disabled = !invItemValid(it); return; }
     var nameOk = it.known || !!(it.name && it.name.trim());
     var entriesOk = it.entries.length > 0 && it.entries.every(function (e) {
       return finalDate(e) && Number(e.qty) > 0 && Number.isInteger(Number(e.qty));
@@ -733,6 +807,7 @@
   $('btnSaveItem').onclick = function () {
     var it = state.item;
     if (!it) return;
+    if (it.inv) { saveInvItem(it); return; }
     if (!it.known && !it.category) {
       if (!confirm('Категорію не обрано — нагадування буде за стандартним порогом. Зберегти?')) return;
     }
@@ -805,6 +880,7 @@
     var target = state.pendingPhoto;
     state.pendingPhoto = null;
     if (!file || !target || (target.kind !== 'compare' && target.kind !== 'invoice' && !state.item)) return;
+    if (target.kind === 'date' && state.item && !state.item.entries.some(function (x) { return x.id === target.entryId; })) return;
     // Накладна — дрібний текст у таблиці, тому більша роздільність.
     var big = target.kind === 'invoice';
     resizeImage(file, big ? 2200 : 1280, big ? 0.82 : 0.85).then(function (b64) {
@@ -1328,6 +1404,694 @@
   });
 
   // ---------------------------------------------------------------------------
+  // Інвентаризація (етап 4, D-10): підрахунок на екрані сканування, звіт, файл для бухгалтерії
+  // ---------------------------------------------------------------------------
+  function saveInventory() { if (state.inventory) LS.set('inventory', state.inventory); else LS.del('inventory'); }
+  function modeLabel(m) { return m === 'dates' ? 'кількість + дати' : 'тільки кількість'; }
+  function isInt(v, min) { return v !== '' && v != null && Number.isInteger(Number(v)) && Number(v) >= min; }
+
+  function renderHomeInventory() {
+    var my = state.inventory;
+    var note = '';
+    if (my) {
+      var n = my.items.length;
+      $('btnInventory').textContent = '↩ Продовжити інвентаризацію (' + modeLabel(my.mode) + ', записів: ' + n + ')';
+      note = '📋 Триває інвентаризація — приймання на цьому телефоні вимкнено.';
+    } else {
+      $('btnInventory').textContent = '📋 Інвентаризація';
+      var other = state.openInventories[0];
+      if (other) {
+        note = '📋 Триває інвентаризація (почав(ла) ' + (other.worker || '—') + ', ' + dt(other.startedAt) +
+          '). Приєднатися — кнопка «📋 Інвентаризація».';
+      }
+    }
+    $('homeInvNote').hidden = !note;
+    $('homeInvNote').textContent = note;
+    var na = state.noArticle;
+    $('noArticleNote').hidden = !na;
+    $('noArticleNote').textContent = na ? 'Товарів без артикулу: ' + na + '. Артикул можна вписати під час інвентаризації або імпортувати довідник (⚙).' : '';
+  }
+
+  $('btnInventory').onclick = function () {
+    if (state.inventory) { openScan(); return; }
+    showInventory(true);
+  };
+
+  var invh = { list: null, loading: false };
+
+  function showInventory(reload) {
+    show('scrInventory', 'Інвентаризація');
+    renderInventoryHome();
+    if (reload || !invh.list) loadInventoryList();
+  }
+
+  function loadInventoryList() {
+    if (!navigator.onLine) { $('invHistMsg').textContent = 'Немає звʼязку — список інвентаризацій недоступний.'; return; }
+    if (invh.loading) return;
+    invh.loading = true;
+    $('btnInvHistRefresh').disabled = true;
+    $('invHistMsg').innerHTML = invh.list ? '' : '<span class="spinner"></span>Завантажую…';
+    flushQueue().then(function () { return api('inventories'); }).then(function (r) {
+      invh.list = r.inventories || [];
+      state.openInventories = invh.list.filter(function (x) { return x.status === 'open'; });
+      LS.set('openInv', state.openInventories);
+      // Цю інвентаризацію завершили з іншого телефона.
+      if (state.inventory && invh.list.some(function (x) { return x.id === state.inventory.id && x.status === 'closed'; })) {
+        toast('Інвентаризацію вже завершено', 4000);
+        state.inventory = null;
+        saveInventory();
+      }
+      $('invHistMsg').textContent = '';
+      renderInventoryHome();
+    }, function (err) {
+      $('invHistMsg').textContent = err.network ? 'Немає звʼязку з сервером.' : err.message;
+      if (/PIN/.test(err.message)) logout(true);
+    }).finally(function () { invh.loading = false; $('btnInvHistRefresh').disabled = false; });
+  }
+  $('btnInvHistRefresh').onclick = loadInventoryList;
+
+  function renderInventoryHome() {
+    var my = state.inventory;
+    $('btnInvContinue').hidden = !my;
+    if (my) $('btnInvContinue').textContent = '↩ Продовжити підрахунок (' + modeLabel(my.mode) + ')';
+    $('invNewCard').hidden = !!my;
+    var blocked = !!state.session;
+    Array.prototype.forEach.call(document.querySelectorAll('.mode-btn'), function (b) { b.disabled = blocked || !state.inventoryReady; });
+    $('invNewHint').textContent = !state.inventoryReady
+      ? 'Інвентаризація ще не ввімкнена на сервері (потрібне оновлення бази). Повідомте адміністратора.'
+      : blocked ? 'Спершу завершіть приймання поставки — під час інвентаризації товар не приймаємо.'
+        : 'Оберіть, що рахуємо. Поки триває інвентаризація, приймання на цьому телефоні вимкнено.';
+
+    // Відкриті інвентаризації інших працівників — приєднатися.
+    var open = (invh.list ? invh.list.filter(function (x) { return x.status === 'open'; }) : state.openInventories)
+      .filter(function (x) { return !my || x.id !== my.id; });
+    $('invOpenOther').innerHTML = open.map(function (x) {
+      return '<div class="card"><div><b>Триває інвентаризація</b> · ' + esc(modeLabel(x.mode)) + '</div>' +
+        '<div class="small-text">Почав(ла) ' + esc(x.worker || '—') + ', ' + esc(dt(x.startedAt)) +
+        (x.products != null ? ' · товарів: ' + esc(x.products) + ', ' + esc(x.totalQty) + ' шт' : '') + '</div>' +
+        '<div class="two"><button class="btn primary" data-join="' + esc(x.id) + '"' + (my || blocked ? ' disabled' : '') + '>Приєднатися</button>' +
+        '<button class="btn" data-report="' + esc(x.id) + '">Звіт</button></div></div>';
+    }).join('');
+
+    var l = invh.list;
+    if (!l) { $('invHist').innerHTML = ''; return; }
+    if (!l.length) { $('invHist').innerHTML = '<div class="card muted">Інвентаризацій ще не було.</div>'; return; }
+    $('invHist').innerHTML = l.map(function (x) {
+      var badge = x.status === 'open' ? '<span class="badge warn">триває</span>'
+        : '<span class="badge ok">' + esc(x.products) + ' тов. · ' + esc(x.totalQty) + ' шт</span>';
+      return '<button class="sess-btn" data-report="' + esc(x.id) + '"><span class="s-main">' +
+        '<div class="s-name">' + esc(dt(x.finishedAt || x.startedAt)) + ' · ' + esc(modeLabel(x.mode)) + '</div>' +
+        '<div class="small-text">' + esc(x.finishedBy || x.worker || '') +
+        (x.status === 'closed' && x.missing ? ' · не відскановано: ' + esc(x.missing) : '') + '</div></span>' + badge + '</button>';
+    }).join('');
+  }
+
+  function onInvHomeClick(ev) {
+    var b = ev.target.closest && ev.target.closest('[data-join],[data-report]');
+    if (!b || b.disabled) return;
+    var id = b.getAttribute('data-join');
+    if (id) {
+      var x = (invh.list || state.openInventories).filter(function (y) { return y.id === id; })[0];
+      if (!x) return;
+      startInventoryLocal({ id: x.id, mode: x.mode, startedAt: x.startedAt, items: [], joined: true });
+      return;
+    }
+    openInvReport(b.getAttribute('data-report'), 'list');
+  }
+  $('invOpenOther').addEventListener('click', onInvHomeClick);
+  $('invHist').addEventListener('click', onInvHomeClick);
+  $('btnInvContinue').onclick = function () { openScan(); };
+
+  Array.prototype.forEach.call(document.querySelectorAll('.mode-btn'), function (b) {
+    b.onclick = function () {
+      if (state.session) { toast('Спершу завершіть приймання поставки', 3500); return; }
+      var mode = b.getAttribute('data-mode');
+      var open = (invh.list ? invh.list.filter(function (x) { return x.status === 'open'; }) : state.openInventories);
+      if (open.length && !confirm('Вже триває інвентаризація (' + (open[0].worker || '—') + '). Краще приєднатися до неї. ' +
+        'Все одно почати нову?')) return;
+      if (!confirm('Почати інвентаризацію: ' + modeLabel(mode) + '?')) return;
+      var invState = { id: uuid(), mode: mode, startedAt: new Date().toISOString(), items: [] };
+      sendOrQueue('startInventory', { inventoryId: invState.id, mode: mode, startedAt: invState.startedAt })
+        .catch(function (err) { toast(err.message, 4000); });
+      startInventoryLocal(invState);
+    };
+  });
+
+  function startInventoryLocal(invState) {
+    state.inventory = invState;
+    saveInventory();
+    openScan();
+  }
+
+  /** Скільки вже пораховано цього товару: сервер (якщо відповів) + невідправлене з телефона, з урахуванням «Замінити». */
+  function localCounted(barcode, serverTotal) {
+    var items = state.inventory ? state.inventory.items.filter(function (x) { return x.barcode === barcode; }) : [];
+    var total = 0;
+    items.forEach(function (x) {
+      if (serverTotal != null && x.status === 'sent') return;
+      if (x.op === 'replace') total = x.qty; else total += x.qty;
+    });
+    if (serverTotal == null) return total;
+    var hasReplace = items.some(function (x) { return x.status !== 'sent' && x.op === 'replace'; });
+    return hasReplace ? total : serverTotal + total;
+  }
+
+  /** Контекст товару для інвентаризації: партії з бази й уже пораховане. r = null — без звʼязку. */
+  function applyInvContext(item, r) {
+    item.ctxLoading = false;
+    var batches = r && r.batches ? r.batches
+      : (cal.data ? cal.data.batches.filter(function (b) { return b.b === item.barcode; }).map(function (b) { return { d: b.d, q: b.q }; }) : []);
+    var counted = r && r.counted ? r.counted : { total: null, dates: [] };
+    item.counted = { total: localCounted(item.barcode, counted.total), dates: counted.dates || [], offline: !r };
+    if (item.mode === 'dates') {
+      var rows = batches.map(function (b) { return { d: b.d, base: b.q, fact: '', done: 0 }; });
+      (counted.dates || []).forEach(function (c) {
+        var row = rows.filter(function (x) { return x.d === c.d; })[0];
+        if (row) row.done = c.q; else rows.push({ d: c.d, base: 0, fact: '', done: c.q });
+      });
+      rows.sort(function (a, b) { return a.d < b.d ? -1 : a.d > b.d ? 1 : 0; });
+      item.batchRows = rows;
+      if (!rows.length && !item.entries.length) item.entries.push(newEntry());
+    }
+    renderInvParts();
+    renderEntries();
+    if (item.mode === 'qty' && state.item === item) setTimeout(function () { if (!$('invQty').value) $('invQty').focus(); }, 50);
+  }
+
+  function renderInvParts() {
+    var it = state.item;
+    var inv = !!(it && it.inv);
+    $('articleField').hidden = !inv;
+    $('invQtyField').hidden = !inv || it.mode !== 'qty';
+    $('invBatches').hidden = !inv || it.mode !== 'dates';
+    $('invCounted').hidden = !inv || it.ctxLoading || !(it.counted && it.counted.total > 0);
+    $('btnAddEntry').hidden = inv && it.mode !== 'dates';
+    $('btnAddEntry').textContent = inv ? '➕ Інша дата (якої немає в списку)' : '➕ Ще одна дата цього товару';
+    if (!inv) return;
+
+    if (it.counted && it.counted.total > 0) {
+      $('invCounted').innerHTML = '<div class="status warn">Вже пораховано: <b>' + it.counted.total + ' шт</b>' +
+        (it.counted.offline ? ' (на цьому телефоні; без звʼязку інші телефони не видно)' : '') +
+        '. Додати чи замінити?</div>' +
+        '<div class="two"><button class="btn' + (it.op === 'add' ? ' primary' : '') + '" data-op="add">➕ Додати</button>' +
+        '<button class="btn' + (it.op === 'replace' ? ' primary' : '') + '" data-op="replace">↺ Замінити</button></div>' +
+        '<p class="hint">' + (it.op === 'add' ? 'Нова кількість додасться до вже порахованої (напр., полиця + холодильник).'
+          : 'Попередній підрахунок цього товару буде скасовано.') + '</p>';
+    }
+
+    if (it.mode === 'dates') {
+      var h = '';
+      if (it.ctxLoading) h = '<div class="status wait"><span class="spinner"></span>Завантажую партії з бази…</div>';
+      else if (it.batchRows.length) {
+        h = '<div class="small-text">Партії в базі — впишіть, скільки фактично є:</div>' +
+          it.batchRows.map(function (r, i) {
+            var info = (r.base ? 'у базі ' + r.base + ' шт' : 'немає в базі') + (r.done ? ' · вже пораховано ' + r.done : '');
+            return '<div class="batch-row"><div><b>до ' + Dates.format(r.d) + '</b><div class="small-text">' + esc(info) + '</div></div>' +
+              '<input type="number" inputmode="numeric" min="0" step="1" placeholder="шт" data-batch="' + i + '" value="' + esc(r.fact) + '"></div>';
+          }).join('');
+      } else {
+        h = '<div class="small-text">Партій цього товару в базі немає — додайте дату нижче.</div>';
+      }
+      $('invBatches').innerHTML = h;
+    }
+    updateSaveButton();
+  }
+
+  $('invCounted').addEventListener('click', function (ev) {
+    var op = ev.target.getAttribute && ev.target.getAttribute('data-op');
+    if (!op || !state.item) return;
+    state.item.op = op;
+    renderInvParts();
+  });
+  $('invBatches').addEventListener('input', function (ev) {
+    var i = ev.target.getAttribute('data-batch');
+    if (i == null || !state.item) return;
+    state.item.batchRows[+i].fact = ev.target.value;
+    updateSaveButton();
+  });
+  $('invQty').addEventListener('input', function () { if (state.item) { state.item.qty = $('invQty').value; updateSaveButton(); } });
+  $('articleInput').addEventListener('input', function () { if (state.item) state.item.article = $('articleInput').value.trim(); });
+
+  function invItemValid(it) {
+    if (it.ctxLoading) return false;
+    if (!(it.known || (it.name && it.name.trim()))) return false;
+    if (it.mode === 'qty') return isInt(it.qty, 0);
+    var badRow = it.batchRows.some(function (r) { return r.fact !== '' && !isInt(r.fact, 0); });
+    var entriesOk = it.entries.every(function (e) { return finalDate(e) && isInt(e.qty, 1); });
+    var any = it.batchRows.some(function (r) { return r.fact !== ''; }) || it.entries.length > 0 || it.batchRows.length > 0;
+    return !badRow && entriesOk && any;
+  }
+
+  function saveInvItem(it) {
+    if (!invItemValid(it)) return;
+    var first = !(it.counted && it.counted.total > 0) || it.op === 'replace';
+    var entries = [];
+    if (it.mode === 'qty') {
+      entries.push({ id: uuid(), date: '', qty: Number(it.qty) });
+    } else {
+      var empty = it.batchRows.filter(function (r) { return r.fact === ''; });
+      if (first && empty.length && !confirm('Для ' + empty.length + ' ' + plural(empty.length, 'партії', 'партій', 'партій') +
+        ' кількість не введено — вважати, що їх немає (0 шт)?')) return;
+      it.batchRows.forEach(function (r) {
+        if (r.fact !== '') entries.push({ id: uuid(), date: r.d, qty: Number(r.fact) });
+        else if (first) entries.push({ id: uuid(), date: r.d, qty: 0 });
+      });
+      it.entries.forEach(function (e) { entries.push({ id: e.id, date: finalDate(e), qty: Number(e.qty) }); });
+      // Дві однакові дати — складаємо.
+      var byDate = {};
+      entries = entries.filter(function (e) {
+        if (byDate[e.date]) { byDate[e.date].qty += e.qty; return false; }
+        byDate[e.date] = e; return true;
+      });
+      if (!entries.length) { $('itemMsg').textContent = 'Введіть кількість хоча б для однієї дати.'; return; }
+    }
+    if (!it.known && !it.category &&
+        !confirm('Категорію не обрано — нагадування буде за стандартним порогом. Зберегти?')) return;
+    var payload = {
+      inventoryId: state.inventory.id,
+      groupId: it.id,
+      barcode: it.barcode,
+      op: it.counted && it.counted.total > 0 ? it.op : 'add',
+      name: it.known ? '' : it.name.trim(),
+      nameSource: it.known ? 'existing' : (it.nameSource || 'manual'),
+      category: it.category || '',
+      article: it.article !== it.articleOrig ? it.article : '',
+      productPhotoBase64: it.known ? '' : (it.productPhotoB64 || ''),
+      countedAt: new Date().toISOString(),
+      entries: entries
+    };
+    var displayName = it.known ? it.name : it.name.trim();
+    var rec = {
+      id: it.id, barcode: it.barcode, name: displayName, status: 'queued', op: payload.op,
+      qty: entries.reduce(function (s, e) { return s + e.qty; }, 0),
+      dates: it.mode === 'dates' ? entries.map(function (e) { return { date: e.date, qty: e.qty }; }) : null
+    };
+    state.inventory.items.push(rec);
+    saveInventory();
+    if (!it.known) {
+      state.data.products[it.barcode] = { n: displayName, c: it.category || '' };
+      LS.set('data', state.data);
+    }
+    $('btnSaveItem').disabled = true;
+    sendOrQueue('inventoryCount', payload).then(function (res) {
+      rec.status = res.queued ? 'queued' : 'sent';
+      saveInventory();
+      renderSessionItems();
+      toast(res.queued ? 'Збережено в телефоні — відправиться, коли зʼявиться звʼязок'
+        : 'Збережено ✓ Усього цього товару: ' + res.result.counted + ' шт');
+      closeItem();
+    }, function (err) {
+      state.inventory.items = state.inventory.items.filter(function (x) { return x !== rec; });
+      saveInventory();
+      renderSessionItems();
+      $('itemMsg').textContent = err.message;
+      $('btnSaveItem').disabled = false;
+    });
+    renderSessionItems();
+  }
+
+  // --- Звіт інвентаризації ---------------------------------------------------
+  var ir = { id: '', from: '', data: null, busy: false, files: {} };
+
+  function openInvReport(id, from) {
+    ir.id = id; ir.from = from; ir.data = null; ir.files = {};
+    $('irTitle').textContent = 'Інвентаризація';
+    $('irSub').textContent = '';
+    $('irBadges').innerHTML = '';
+    $('irActions').innerHTML = '';
+    $('irFiles').innerHTML = '';
+    $('irLists').innerHTML = '';
+    show('scrInvReport', 'Звіт інвентаризації');
+    loadInvReport();
+  }
+
+  function setIrStatus(cls, html) {
+    var st = $('irStatus');
+    st.hidden = !html;
+    st.className = 'status ' + cls;
+    st.innerHTML = html;
+  }
+
+  function sentBefore() {
+    if (!navigator.onLine) return Promise.reject(new NetworkError('Немає звʼязку'));
+    return flushQueue().then(function () { return queue.count(); }).then(function (n) {
+      if (n) throw new Error('Ще не відправлено записів: ' + n + '. Дочекайтесь звʼязку й спробуйте ще раз.');
+    });
+  }
+
+  function loadInvReport() {
+    var id = ir.id;
+    ir.busy = true;
+    setIrStatus('wait', '<span class="spinner"></span>Завантажую звіт…');
+    sentBefore().then(function () { return api('inventory', { inventoryId: id }, 60000); }).then(function (r) {
+      if (ir.id !== id) return;
+      ir.data = r;
+      if (r.inventory.status === 'closed' && state.inventory && state.inventory.id === id) {
+        state.inventory = null;
+        saveInventory();
+      }
+      setIrStatus('', '');
+    }, function (err) {
+      if (ir.id !== id) return;
+      setIrStatus('bad', esc(err.network ? 'Немає звʼязку. Звіт потребує інтернету — спробуйте пізніше.' : err.message));
+      if (/PIN/.test(err.message)) logout(true);
+    }).finally(function () {
+      if (ir.id !== id) return;
+      ir.busy = false;
+      renderInvReport();
+    });
+  }
+
+  function renderInvReport() {
+    var d = ir.data;
+    if (!d) {
+      $('irActions').innerHTML = ir.from === 'scan' ? '<button class="btn" id="btnIrBack">↩ Повернутися до підрахунку</button>' : '';
+      return;
+    }
+    var inv = d.inventory, lines = d.lines || [];
+    var closed = inv.status === 'closed';
+    var counted = lines.filter(function (l) { return l.counted; });
+    var missing = lines.filter(function (l) { return !l.counted; });
+    var fresh = counted.filter(function (l) { return l.new || !l.base; });
+    var total = counted.reduce(function (s, l) { return s + l.q; }, 0);
+    $('irTitle').textContent = (closed ? 'Інвентаризація від ' : 'Інвентаризація (триває) · ') + dt(inv.finishedAt || inv.startedAt);
+    $('irSub').textContent = modeLabel(inv.mode) + ' · рахували: ' + (d.workers || inv.worker || '—') +
+      (closed ? ' · завершив(ла) ' + (inv.finishedBy || '—') : '');
+    var badges = ['<span class="badge">товарів: ' + counted.length + '</span>', '<span class="badge">усього: ' + total + ' шт</span>'];
+    if (fresh.length) badges.push('<span class="badge warn">не було в базі: ' + fresh.length + '</span>');
+    badges.push(missing.length ? '<span class="badge bad">не відскановано: ' + missing.length + '</span>'
+      : '<span class="badge ok">усе з бази відскановано</span>');
+    $('irBadges').innerHTML = badges.join('');
+
+    var a = '';
+    if (!closed) {
+      var mine = state.inventory && state.inventory.id === inv.id;
+      if (mine) a += '<button class="btn" id="btnIrBack">↩ Повернутися до підрахунку</button>';
+      a += '<button class="btn primary" id="btnIrFinish"' + (ir.busy ? ' disabled' : '') + '>✅ Завершити інвентаризацію</button>' +
+        '<p class="hint">' + (inv.mode === 'dates'
+          ? 'Після завершення залишки порахованих товарів у календарі стануть фактичними: пораховані дати — порахована кількість, інші партії цих товарів — 0. Товари, яких не відскановано, не змінюються.'
+          : 'Режим «тільки кількість»: залишки в базі не змінюються, буде лише файл для бухгалтерії.') +
+        ' Поки не завершено, рахувати можна з кількох телефонів.</p>';
+    } else {
+      a += '<div class="two"><button class="btn primary" data-file="pdf"' + (ir.busy ? ' disabled' : '') + '>📄 PDF</button>' +
+        '<button class="btn primary" data-file="xlsx"' + (ir.busy ? ' disabled' : '') + '>📊 Excel</button></div>' +
+        '<p class="hint">Файл для бухгалтерії: № · штрих-код · номер · артикул · назва · кількість. Штрих-коди можна «пропікати» сканером.</p>';
+    }
+    $('irActions').innerHTML = a;
+    renderIrFiles();
+
+    var h = '';
+    if (missing.length) {
+      h += '<div class="recon-group"><h3 class="bad">❗ Був залишок у базі, але не відскановано (' + missing.length + ')</h3><ul class="items">' +
+        missing.map(function (l) {
+          return '<li class="bad"><div><div class="inv-name">' + esc(l.n) + '</div><div class="dates">' + esc(l.b) +
+            (l.a ? ' · арт. ' + esc(l.a) : '') + '</div></div><span class="qty">у базі ' + l.base + '</span></li>';
+        }).join('') + '</ul>' + (closed ? '' : '<p class="hint">Перевірте полиці й склад. Якщо товару немає — нічого не робіть; якщо є — відскануйте.</p>') + '</div>';
+    }
+    if (fresh.length) {
+      h += '<div class="recon-group"><h3 class="warn">⚠ Відскановано, але не було в базі (' + fresh.length + ')</h3><ul class="items">' +
+        fresh.map(function (l) {
+          return '<li class="warn"><div><div class="inv-name">' + esc(l.n) + '</div><div class="dates">' + esc(l.b) +
+            (l.new ? ' · новий товар' : ' · залишку в базі не було') + '</div></div><span class="qty">' + l.q + ' шт</span></li>';
+        }).join('') + '</ul></div>';
+    }
+    if (counted.length) {
+      h += '<details class="recon-ok"' + (counted.length <= 30 ? ' open' : '') + '><summary>📋 Пораховано (' + counted.length + ')</summary><ul class="items">' +
+        counted.map(function (l) {
+          var sub = esc(l.b) + (l.a ? ' · арт. ' + esc(l.a) : '') + ' · у базі було ' + l.base;
+          if (l.dates && l.dates.length) {
+            sub += '<div>' + l.dates.map(function (x) {
+              return esc(Dates.format(x.d)) + ': ' + x.q + (x.q !== x.base ? ' <span class="muted-text">(у базі ' + x.base + ')</span>' : '');
+            }).join(' · ') + '</div>';
+          }
+          return '<li><div><div class="inv-name">' + esc(l.n) + '</div><div class="dates">' + sub + '</div></div>' +
+            '<span class="qty">' + l.q + ' шт</span></li>';
+        }).join('') + '</ul></details>';
+    } else {
+      h += '<div class="card muted">Ще нічого не пораховано.</div>';
+    }
+    $('irLists').innerHTML = h;
+  }
+
+  $('irActions').addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('button');
+    if (!t || t.disabled) return;
+    if (t.id === 'btnIrBack') { openScan(); return; }
+    if (t.id === 'btnIrFinish') { finishInventory(); return; }
+    var f = t.getAttribute('data-file');
+    if (f) exportInventory(f);
+  });
+
+  function finishInventory() {
+    var d = ir.data;
+    if (!d || ir.busy) return;
+    var missing = (d.lines || []).filter(function (l) { return !l.counted; }).length;
+    var msg = 'Завершити інвентаризацію?' + (missing ? '\nНе відскановано товарів із залишком: ' + missing + '.' : '') +
+      (d.inventory.mode === 'dates' ? '\nЗалишки порахованих товарів у базі буде замінено фактичними.' : '') +
+      '\nПісля завершення рахувати вже не можна.';
+    if (!confirm(msg)) return;
+    var id = ir.id;
+    ir.busy = true;
+    renderInvReport();
+    setIrStatus('wait', '<span class="spinner"></span>Завершую…');
+    sentBefore().then(function () { return api('finishInventory', { inventoryId: id }, 120000); }).then(function (r) {
+      ir.data = r;
+      if (state.inventory && state.inventory.id === id) { state.inventory = null; saveInventory(); }
+      // Залишки в календарі змінились — перезавантажимо при наступному відкритті.
+      cal.data = null; LS.del('calendar');
+      invh.list = null;
+      setIrStatus('ok', '✅ Інвентаризацію завершено. Завантажте файл для бухгалтерії.');
+      refreshData(true);
+    }, function (err) {
+      setIrStatus('bad', esc(err.network ? 'Немає звʼязку з сервером. Спробуйте ще раз.' : err.message));
+    }).finally(function () {
+      ir.busy = false;
+      renderInvReport();
+    });
+  }
+
+  function b64ToBlob(b64, mime) {
+    var bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  function exportInventory(format) {
+    if (ir.busy) return;
+    var id = ir.id;
+    ir.busy = true;
+    renderInvReport();
+    setIrStatus('wait', '<span class="spinner"></span>Готую ' + (format === 'pdf' ? 'PDF' : 'Excel') + '…');
+    api('inventoryExport', { inventoryId: id, format: format }, 120000).then(function (r) {
+      if (ir.id !== id) return;
+      var old = ir.files[format];
+      if (old) URL.revokeObjectURL(old.url);
+      var blob = b64ToBlob(r.base64, r.mime);
+      ir.files[format] = { name: r.filename, url: URL.createObjectURL(blob), blob: blob, mime: r.mime };
+      setIrStatus('', '');
+    }, function (err) {
+      setIrStatus('bad', esc(err.network ? 'Немає звʼязку з сервером. Спробуйте ще раз.' : err.message));
+    }).finally(function () {
+      if (ir.id !== id) return;
+      ir.busy = false;
+      renderInvReport();
+    });
+  }
+
+  function renderIrFiles() {
+    var keys = Object.keys(ir.files);
+    $('irFiles').innerHTML = keys.map(function (k) {
+      var f = ir.files[k];
+      var canShare = false;
+      try { canShare = !!(navigator.canShare && navigator.canShare({ files: [new File([f.blob], f.name, { type: f.mime })] })); } catch (e) { /* ні */ }
+      return '<div class="card"><div><b>' + (k === 'pdf' ? '📄 ' : '📊 ') + esc(f.name) + '</b> · ' + Math.max(1, Math.round(f.blob.size / 1024)) + ' КБ</div>' +
+        '<div class="' + (canShare ? 'two' : '') + '"><a class="btn" href="' + f.url + '" download="' + esc(f.name) + '">⬇ Завантажити</a>' +
+        (canShare ? '<button class="btn" data-share="' + k + '">📤 Надіслати</button>' : '') + '</div></div>';
+    }).join('');
+  }
+  $('irFiles').addEventListener('click', function (ev) {
+    var k = ev.target.getAttribute && ev.target.getAttribute('data-share');
+    if (!k || !ir.files[k]) return;
+    var f = ir.files[k];
+    navigator.share({ files: [new File([f.blob], f.name, { type: f.mime })], title: f.name }).catch(function () { /* скасовано */ });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Імпорт довідника з офісу (етап 4, D-14): Excel / CSV → перевірка → застосувати
+  // ---------------------------------------------------------------------------
+  var catImp = { table: null, file: '', header: true, map: { b: -1, a: -1, n: -1 }, report: null, busy: false };
+  var SHEETJS = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+
+  $('btnCatFile').onclick = function () { $('catFileInput').value = ''; $('catFileInput').click(); };
+  $('catFileInput').addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    if (!file) return;
+    catImp.file = file.name;
+    catImp.report = null;
+    $('catOut').innerHTML = '<div class="status wait"><span class="spinner"></span>Читаю файл…</div>';
+    readTable(file).then(function (table) {
+      table = table.filter(function (r) { return r.some(function (c) { return String(c).trim() !== ''; }); });
+      if (!table.length) throw new Error('Файл порожній');
+      catImp.table = table;
+      guessColumns();
+      renderCatalog();
+    }).catch(function (err) {
+      $('catOut').innerHTML = '<div class="status bad">' + esc(err.message || 'Не вдалося прочитати файл') + '</div>';
+    });
+  });
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src; s.onload = resolve;
+      s.onerror = function () { reject(new Error('Не вдалося завантажити модуль читання Excel. Перевірте інтернет або збережіть файл як CSV.')); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function cellText(v) {
+    if (v == null) return '';
+    if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v);
+    return String(v).trim();
+  }
+
+  function readTable(file) {
+    if (/\.csv$/i.test(file.name) || file.type === 'text/csv') {
+      return file.text().then(parseCsv);
+    }
+    var load = window.XLSX ? Promise.resolve() : loadScript(SHEETJS);
+    return load.then(function () { return file.arrayBuffer(); }).then(function (buf) {
+      var wb = window.XLSX.read(buf, { type: 'array' });
+      var ws = wb.Sheets[wb.SheetNames[0]];
+      return window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' }).map(function (r) { return r.map(cellText); });
+    });
+  }
+
+  function parseCsv(text) {
+    text = text.replace(/^﻿/, '');
+    var first = text.split(/\r?\n/)[0] || '';
+    var delim = [';', '\t', ','].sort(function (a, b) { return first.split(b).length - first.split(a).length; })[0];
+    var rows = [], row = [], cur = '', q = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (q) {
+        if (ch === '"' && text[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === delim) { row.push(cur.trim()); cur = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        row.push(cur.trim()); rows.push(row); row = []; cur = '';
+      } else cur += ch;
+    }
+    if (cur || row.length) { row.push(cur.trim()); rows.push(row); }
+    return rows;
+  }
+
+  function guessColumns() {
+    var t = catImp.table, head = t[0].map(function (c) { return String(c).toLowerCase(); });
+    var find = function (re) { for (var i = 0; i < head.length; i++) if (re.test(head[i])) return i; return -1; };
+    var m = { b: find(/штрих|barcode|ean|шк\b|bar code/), a: find(/артикул|article|sku|код товару|^код$/), n: find(/назва|найменування|name|товар/) };
+    catImp.header = m.b >= 0 || m.n >= 0;
+    if (m.b < 0) {
+      // За вмістом: колонка, де найбільше 8–14-значних чисел.
+      var best = -1, bestN = 0, cols = Math.max.apply(null, t.map(function (r) { return r.length; }));
+      for (var c = 0; c < cols; c++) {
+        var n = t.slice(0, 50).filter(function (r) { return /^\d{8,14}$/.test(String(r[c] || '').replace(/\s/g, '')); }).length;
+        if (n > bestN) { bestN = n; best = c; }
+      }
+      m.b = best;
+    }
+    if (m.n === m.b) m.n = -1;
+    if (m.a === m.b) m.a = -1;
+    catImp.map = m;
+  }
+
+  function catRows() {
+    var t = catImp.table, m = catImp.map;
+    return t.slice(catImp.header ? 1 : 0).map(function (r) {
+      return { barcode: String(r[m.b] || '').replace(/\s/g, ''), article: m.a >= 0 ? r[m.a] : '', name: m.n >= 0 ? r[m.n] : '' };
+    }).filter(function (r) { return r.barcode; });
+  }
+
+  function renderCatalog() {
+    var t = catImp.table;
+    if (!t) { $('catOut').innerHTML = ''; return; }
+    var cols = Math.max.apply(null, t.map(function (r) { return r.length; }));
+    var labels = [];
+    for (var c = 0; c < cols; c++) {
+      var name = catImp.header ? String(t[0][c] || '').trim() : '';
+      labels.push((c + 1) + (name ? ' — ' + name : '') + (catImp.header ? '' : ' (' + String((t[0] || [])[c] || '').slice(0, 20) + ')'));
+    }
+    var sel = function (key, label, optional) {
+      return '<label class="field">' + label + '<select data-map="' + key + '">' +
+        (optional ? '<option value="-1">— немає —</option>' : '<option value="-1">— оберіть —</option>') +
+        labels.map(function (l, i) { return '<option value="' + i + '"' + (catImp.map[key] === i ? ' selected' : '') + '>' + esc(l) + '</option>'; }).join('') +
+        '</select></label>';
+    };
+    var rows = catImp.map.b >= 0 ? catRows() : [];
+    var sci = rows.filter(function (r) { return /e\+/i.test(r.barcode); }).length;
+    var h = '<div class="small-text">' + esc(catImp.file) + ' · рядків: ' + (t.length - (catImp.header ? 1 : 0)) + '</div>' +
+      '<label class="check-row"><input type="checkbox" id="catHeader"' + (catImp.header ? ' checked' : '') + '><span class="c-body">Перший рядок — заголовки</span></label>' +
+      sel('b', 'Колонка зі штрих-кодом', false) + sel('a', 'Колонка з артикулом', true) + sel('n', 'Колонка з назвою', true);
+    if (sci) h += '<div class="status bad">У ' + sci + ' штрих-кодах Excel зіпсував число (вигляд 4,82E+12). Відформатуйте колонку як текст і збережіть файл ще раз.</div>';
+    h += '<button class="btn primary" id="btnCatCheck"' + (catImp.map.b < 0 || !rows.length || catImp.busy ? ' disabled' : '') + '>🔍 Перевірити (' + rows.length + ')</button>';
+
+    var r = catImp.report;
+    if (r) {
+      var li = function (items, fn) { return items.length ? '<ul class="items">' + items.map(fn).join('') + '</ul>' : ''; };
+      h += '<div class="recon-sum"><span class="badge">у файлі: ' + r.rows + '</span><span class="badge ok">знайдено в базі: ' + r.matched + '</span>' +
+        '<span class="badge' + (r.unknown ? ' warn' : '') + '">немає в базі: ' + r.unknown + '</span></div>';
+      if (r.applied) {
+        h += '<div class="status ok">✅ Застосовано: артикулів ' + r.applied.articles + ', назв ' + r.applied.names + ', нових товарів ' + r.applied.added + '.</div>';
+      } else {
+        h += '<div class="recon-group"><h3>Артикули: нових ' + r.articleNew + ', змінено ' + r.articleChanged + '</h3>' +
+          li(r.samples.articles, function (x) {
+            return '<li><div><div class="inv-name">' + esc(x.name) + '</div><div class="dates">' + esc(x.barcode) + ' · ' +
+              (x.from ? esc(x.from) + ' → ' : '') + '<b>' + esc(x.to) + '</b></div></div></li>';
+          }) + '</div>';
+        h += '<label class="check-row"><input type="checkbox" id="catNames"' + (r.nameDiff ? ' checked' : ' disabled') + '><span class="c-body">' +
+          '<span class="inv-name">Записати назви з довідника (' + r.nameDiff + ')</span>' +
+          '<span class="small-text">Назва з довідника важливіша за накладну й ШІ; ручні назви (' + r.nameManual + ') не змінюються.</span></span></label>' +
+          li(r.samples.names, function (x) {
+            return '<li><div><div class="inv-name">' + esc(x.to) + '</div><div class="dates"><span class="was">' + esc(x.from) + '</span>' +
+              (x.manual ? ' · ручна назва — залишиться' : '') + '</div></div></li>';
+          });
+        h += '<label class="check-row"><input type="checkbox" id="catNew"' + (r.unknownNamed ? '' : ' disabled') + '><span class="c-body">' +
+          '<span class="inv-name">Додати в базу товари, яких ще немає (' + r.unknownNamed + ')</span>' +
+          '<span class="small-text">Тоді під час приймання й інвентаризації їх назва буде відома одразу.</span></span></label>' +
+          li(r.samples.unknown.slice(0, 5), function (x) {
+            return '<li><div><div class="inv-name">' + esc(x.name || '(без назви)') + '</div><div class="dates">' + esc(x.barcode) + '</div></div></li>';
+          });
+        h += '<button class="btn primary" id="btnCatApply"' + (catImp.busy ? ' disabled' : '') + '>Застосувати</button>';
+      }
+    }
+    $('catOut').innerHTML = h;
+  }
+
+  $('catOut').addEventListener('change', function (ev) {
+    var k = ev.target.getAttribute && ev.target.getAttribute('data-map');
+    if (k) { catImp.map[k] = +ev.target.value; catImp.report = null; renderCatalog(); return; }
+    if (ev.target.id === 'catHeader') { catImp.header = ev.target.checked; catImp.report = null; renderCatalog(); }
+  });
+  $('catOut').addEventListener('click', function (ev) {
+    var id = ev.target && ev.target.id;
+    if (id !== 'btnCatCheck' && id !== 'btnCatApply') return;
+    if (catImp.busy) return;
+    var apply = id === 'btnCatApply';
+    var names = apply && $('catNames') && $('catNames').checked;
+    var addNew = apply && $('catNew') && $('catNew').checked;
+    if (apply && !confirm('Застосувати довідник: артикули' + (names ? ', назви' : '') + (addNew ? ', нові товари' : '') + '?')) return;
+    catImp.busy = true;
+    renderCatalog();
+    api('importCatalog', { rows: catRows(), apply: apply, names: names, addNew: addNew }, 120000).then(function (r) {
+      catImp.report = r.report;
+      if (apply) { toast('Довідник застосовано'); refreshData(true); }
+    }, function (err) {
+      toast(err.network ? 'Немає звʼязку з сервером' : err.message, 5000);
+    }).finally(function () { catImp.busy = false; renderCatalog(); });
+  });
+
+  // ---------------------------------------------------------------------------
   // Налаштування та службові кнопки
   // ---------------------------------------------------------------------------
   $('btnSettings').onclick = function () {
@@ -1343,6 +2107,11 @@
     }
     if (current === 'scrMonth') { showCalendar(); return; }
     if (current === 'scrInvoice' && inv.from === 'list') { showInvoices(false); return; }
+    if (current === 'scrInvReport') {
+      if (ir.from === 'scan' && state.inventory && state.inventory.id === ir.id) { openScan(); return; }
+      showInventory(false); return;
+    }
+    if (current === 'scrScan' && state.inventory) { showInventory(false); return; }
     goHome();
   };
   $('btnChangeUrl').onclick = showSetup;
