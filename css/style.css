@@ -247,3 +247,5 @@ details.recon-ok ul { margin-top: 6px; }
 a.btn { text-decoration: none; box-sizing: border-box; }
 #irActions, #irFiles, #irLists, #invOpenOther, #invHist, #catOut { display: flex; flex-direction: column; gap: 8px; }
 .cal-bar .list-title { margin: 0; }
+
+.pin.small-pin { font-size: 20px; letter-spacing: 4px; }

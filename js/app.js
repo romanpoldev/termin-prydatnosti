@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '4.0.0';
+  var APP_VERSION = '4.1.0';
   // Сервер за замовчуванням (Supabase). Інший можна задати в налаштуваннях або посиланням ?api=
   var DEFAULT_API = 'https://zsxwxaosspbjltmvdtpc.supabase.co/functions/v1/api';
   var API_RE = /^https:\/\/([a-z0-9-]+\.supabase\.co\/functions\/v1\/|script\.google(usercontent)?\.com\/).+/;
@@ -42,6 +42,7 @@
     openInventories: LS.get('openInv', []),  // відкриті інвентаризації на сервері (з bootstrap)
     inventoryReady: LS.get('invReady', true),
     noArticle: null,
+    weakPin: LS.get('weakPin', false),
     item: null,                           // товар, який зараз приймаємо
     scanner: null,
     scanning: false,
@@ -245,6 +246,7 @@
         ', позицій: ' + state.session.items.length + ')';
     }
     renderHomeInventory();
+    $('weakPinNote').hidden = !state.weakPin;
     updateNet();
     show('scrHome');
   }
@@ -305,6 +307,8 @@
     state.openInventories = r.openInventories || [];
     state.inventoryReady = r.inventoryReady !== false;
     state.noArticle = r.noArticle == null ? null : r.noArticle;
+    state.weakPin = !!r.weakPin;
+    LS.set('weakPin', state.weakPin);
     LS.set('data', state.data);
     LS.set('openInv', state.openInventories);
     LS.set('invReady', state.inventoryReady);
@@ -2141,6 +2145,31 @@
     }).finally(function () { $('btnCompare').disabled = false; });
   }
   $('btnRefresh').onclick = function () { refreshData(false); };
+
+  $('btnChangePin').onclick = function () {
+    var a = $('newPin').value.trim(), b = $('newPin2').value.trim();
+    var msg = $('pinMsg');
+    msg.className = 'hint error';
+    if (a.length < 6) { msg.textContent = 'PIN має бути від 6 символів.'; return; }
+    if (a !== b) { msg.textContent = 'PIN-и не збігаються.'; return; }
+    if (a === state.user.pin) { msg.textContent = 'Це ваш поточний PIN.'; return; }
+    $('btnChangePin').disabled = true;
+    msg.className = 'hint';
+    msg.innerHTML = '<span class="spinner"></span>Змінюю…';
+    // Спершу відправляємо чергу: вона піде зі старим PIN-ом.
+    flushQueue().then(function () { return api('changePin', { newPin: a }); }).then(function () {
+      state.user.pin = a;
+      LS.set('user', state.user);
+      state.weakPin = false;
+      LS.set('weakPin', false);
+      $('newPin').value = ''; $('newPin2').value = '';
+      msg.className = 'hint';
+      msg.textContent = '✅ PIN змінено. Наступного разу входьте з новим PIN-ом.';
+    }, function (err) {
+      msg.className = 'hint error';
+      msg.textContent = err.network ? 'Немає звʼязку з сервером.' : err.message;
+    }).finally(function () { $('btnChangePin').disabled = false; });
+  };
   $('btnLogout').onclick = function () { logout(false); };
   $('btnFlush').onclick = function () { flushQueue(); };
 

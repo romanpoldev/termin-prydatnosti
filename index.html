@@ -34,7 +34,7 @@
     <!-- Вхід -->
     <section class="screen" id="scrLogin" hidden>
       <p class="lead">Введіть свій PIN-код</p>
-      <input id="pin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+      <input id="pin" class="pin" type="password" inputmode="numeric" maxlength="32" autocomplete="off">
       <button class="btn primary" id="btnLogin">Увійти</button>
       <p class="hint error" id="loginMsg"></p>
     </section>
@@ -42,6 +42,7 @@
     <!-- Головна -->
     <section class="screen" id="scrHome" hidden>
       <p class="lead" id="hello"></p>
+      <div class="status warn" id="weakPinNote" hidden>🔑 Ваш PIN короткий. Змініть його: ⚙ → «Змінити PIN» (від 6 символів).</div>
       <div class="status warn" id="homeInvNote" hidden></div>
       <button class="btn primary big" id="btnStart">📦 Почати приймання</button>
       <button class="btn big" id="btnContinue" hidden>↩ Продовжити приймання</button>
@@ -206,6 +207,18 @@
         <p class="hint">Сфотографуйте дату на упаковці — сервер надішле фото в кілька моделей і покаже, що прочитала кожна, за скільки секунд і скільки це коштує.</p>
         <button class="btn" id="btnCompare">📷 Фото дати для порівняння</button>
         <div id="compareOut"></div>
+      </div>
+      <div class="card">
+        <div><b>🔑 Змінити PIN</b></div>
+        <p class="hint">Від 6 символів. Новий PIN діятиме одразу на всіх телефонах; старий перестане працювати.</p>
+        <label class="field">Новий PIN
+          <input id="newPin" class="pin small-pin" type="password" inputmode="numeric" maxlength="32" autocomplete="new-password">
+        </label>
+        <label class="field">Ще раз
+          <input id="newPin2" class="pin small-pin" type="password" inputmode="numeric" maxlength="32" autocomplete="new-password">
+        </label>
+        <button class="btn" id="btnChangePin">Змінити PIN</button>
+        <p class="hint" id="pinMsg"></p>
       </div>
       <div class="card">
         <div><b>📥 Імпорт довідника з офісу</b></div>
