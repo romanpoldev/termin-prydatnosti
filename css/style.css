@@ -204,6 +204,8 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
 }
 .sess-btn .s-main { min-width: 0; }
 .sess-btn .s-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.sess-btn.off { opacity: .6; }
+.sess-btn:disabled { cursor: default; }
 .badge {
   flex: none; font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 999px;
   background: var(--bg); color: var(--muted); border: 1px solid var(--line); white-space: nowrap;

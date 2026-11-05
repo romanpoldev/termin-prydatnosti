@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '4.1.0';
+  var APP_VERSION = '4.2.0';
   // Сервер за замовчуванням (Supabase). Інший можна задати в налаштуваннях або посиланням ?api=
   var DEFAULT_API = 'https://zsxwxaosspbjltmvdtpc.supabase.co/functions/v1/api';
   var API_RE = /^https:\/\/([a-z0-9-]+\.supabase\.co\/functions\/v1\/|script\.google(usercontent)?\.com\/).+/;
@@ -43,6 +43,8 @@
     inventoryReady: LS.get('invReady', true),
     noArticle: null,
     weakPin: LS.get('weakPin', false),
+    role: LS.get('role', 'worker'),        // owner | manager | worker (D-18)
+    invExpected: LS.get('invExp', null),  // інвентаризація за файлом: { id, map: {ключ: [кількість, назва]} }
     item: null,                           // товар, який зараз приймаємо
     scanner: null,
     scanning: false,
@@ -218,7 +220,7 @@
   // Навігація
   // ---------------------------------------------------------------------------
   var SCREENS = ['scrSetup', 'scrLogin', 'scrHome', 'scrSession', 'scrScan', 'scrSettings', 'scrCalendar', 'scrMonth',
-    'scrInvoices', 'scrInvoice', 'scrInventory', 'scrInvReport'];
+    'scrInvoices', 'scrInvoice', 'scrInventory', 'scrInvReport', 'scrWorkers'];
   var current = '';
 
   function show(id, title) {
@@ -229,7 +231,7 @@
     var loggedIn = !!state.user;
     $('btnSettings').hidden = !loggedIn || id === 'scrSettings' || id === 'scrSetup';
     $('btnBack').hidden = ['scrSession', 'scrScan', 'scrSettings', 'scrCalendar', 'scrMonth', 'scrInvoices', 'scrInvoice',
-      'scrInventory', 'scrInvReport'].indexOf(id) === -1 ||
+      'scrInventory', 'scrInvReport', 'scrWorkers'].indexOf(id) === -1 ||
       (id === 'scrSettings' && !loggedIn);
     window.scrollTo(0, 0);
   }
@@ -309,6 +311,8 @@
     state.noArticle = r.noArticle == null ? null : r.noArticle;
     state.weakPin = !!r.weakPin;
     LS.set('weakPin', state.weakPin);
+    state.role = r.role || 'worker';
+    LS.set('role', state.role);
     LS.set('data', state.data);
     LS.set('openInv', state.openInventories);
     LS.set('invReady', state.inventoryReady);
@@ -372,7 +376,7 @@
 
   function openScan() {
     var inv = state.inventory;
-    $('sessionInfo').textContent = inv ? 'Інвентаризація · ' + modeLabel(inv.mode) : state.session.supplier;
+    $('sessionInfo').textContent = inv ? 'Інвентаризація · ' + invLabel(inv) : state.session.supplier;
     $('listTitle').textContent = inv ? 'Пораховано на цьому телефоні' : 'Прийнято в цій поставці';
     renderSessionItems();
     closeItem();
@@ -556,6 +560,8 @@
             state.item.nameSource = 'existing';
             $('newProduct').hidden = true;
             renderItemHead();
+          } else if (item.expected && item.expected[1]) {
+            $('newProductHint').textContent = 'Назва з файлу. Перевірте або сфотографуйте товар.';
           } else if (r.off && r.off.name) {
             setSuggestedName(r.off.name, 'off');
             $('newProductHint').textContent = 'Знайдено у відкритій базі Open Food Facts. Перевірте назву або сфотографуйте товар.';
@@ -573,8 +579,25 @@
     } else {
       $('newProduct').hidden = true;
     }
+    if (inv && inv.source === 'file') {
+      var ex = expectedFor(barcode);
+      if (ex === undefined) {
+        loadExpected(inv.id).then(function () { if (state.item === item) { fileHint(item); renderInvParts(); } });
+      } else fileHint(item);
+    }
     renderInvParts();
     renderEntries();
+  }
+
+  /** Інвентаризація за файлом: що каже файл про цей товар; новому товару — назва з файлу. */
+  function fileHint(item) {
+    var ex = expectedFor(item.barcode);
+    item.expected = ex === undefined ? undefined : ex;
+    if (ex && ex[1] && !item.known && !$('nameInput').value) {
+      setSuggestedName(ex[1], 'invoice');
+      $('newProductHint').textContent = 'Назва з файлу. Перевірте або сфотографуйте товар.';
+      updateSaveButton();
+    }
   }
 
   function renderItemHead() {
@@ -1413,19 +1436,23 @@
   function saveInventory() { if (state.inventory) LS.set('inventory', state.inventory); else LS.del('inventory'); }
   function modeLabel(m) { return m === 'dates' ? 'кількість + дати' : 'тільки кількість'; }
   function isInt(v, min) { return v !== '' && v != null && Number.isInteger(Number(v)) && Number(v) >= min; }
+  function isManager() { return state.role === 'owner' || state.role === 'manager'; }
+  function invLabel(x) { return x.source === 'file' ? 'за файлом' + (x.fileName ? ' «' + x.fileName + '»' : '') + ' · ' + modeLabel(x.mode) : modeLabel(x.mode); }
+  function bKey(b) { return String(b || '').replace(/^0+/, ''); }
+  function numText(v) { return v == null ? '—' : String(Math.round(v * 1000) / 1000).replace('.', ','); }
 
   function renderHomeInventory() {
     var my = state.inventory;
     var note = '';
     if (my) {
       var n = my.items.length;
-      $('btnInventory').textContent = '↩ Продовжити інвентаризацію (' + modeLabel(my.mode) + ', записів: ' + n + ')';
+      $('btnInventory').textContent = '↩ Продовжити інвентаризацію (' + invLabel(my) + ', записів: ' + n + ')';
       note = '📋 Триває інвентаризація — приймання на цьому телефоні вимкнено.';
     } else {
       $('btnInventory').textContent = '📋 Інвентаризація';
       var other = state.openInventories[0];
       if (other) {
-        note = '📋 Триває інвентаризація (почав(ла) ' + (other.worker || '—') + ', ' + dt(other.startedAt) +
+        note = '📋 Триває інвентаризація' + (other.source === 'file' ? ' за файлом' : '') + ' (почав(ла) ' + (other.worker || '—') + ', ' + dt(other.startedAt) +
           '). Приєднатися — кнопка «📋 Інвентаризація».';
       }
     }
@@ -1477,8 +1504,10 @@
   function renderInventoryHome() {
     var my = state.inventory;
     $('btnInvContinue').hidden = !my;
-    if (my) $('btnInvContinue').textContent = '↩ Продовжити підрахунок (' + modeLabel(my.mode) + ')';
-    $('invNewCard').hidden = !!my;
+    if (my) $('btnInvContinue').textContent = '↩ Продовжити підрахунок (' + invLabel(my) + ')';
+    $('invNewCard').hidden = !!my || !$('invFileCard').hidden;
+    $('btnInvFile').hidden = !isManager();
+    if (my) $('invFileCard').hidden = true;
     var blocked = !!state.session;
     Array.prototype.forEach.call(document.querySelectorAll('.mode-btn'), function (b) { b.disabled = blocked || !state.inventoryReady; });
     $('invNewHint').textContent = !state.inventoryReady
@@ -1490,7 +1519,7 @@
     var open = (invh.list ? invh.list.filter(function (x) { return x.status === 'open'; }) : state.openInventories)
       .filter(function (x) { return !my || x.id !== my.id; });
     $('invOpenOther').innerHTML = open.map(function (x) {
-      return '<div class="card"><div><b>Триває інвентаризація</b> · ' + esc(modeLabel(x.mode)) + '</div>' +
+      return '<div class="card"><div><b>Триває інвентаризація</b> · ' + esc(invLabel(x)) + '</div>' +
         '<div class="small-text">Почав(ла) ' + esc(x.worker || '—') + ', ' + esc(dt(x.startedAt)) +
         (x.products != null ? ' · товарів: ' + esc(x.products) + ', ' + esc(x.totalQty) + ' шт' : '') + '</div>' +
         '<div class="two"><button class="btn primary" data-join="' + esc(x.id) + '"' + (my || blocked ? ' disabled' : '') + '>Приєднатися</button>' +
@@ -1504,9 +1533,10 @@
       var badge = x.status === 'open' ? '<span class="badge warn">триває</span>'
         : '<span class="badge ok">' + esc(x.products) + ' тов. · ' + esc(x.totalQty) + ' шт</span>';
       return '<button class="sess-btn" data-report="' + esc(x.id) + '"><span class="s-main">' +
-        '<div class="s-name">' + esc(dt(x.finishedAt || x.startedAt)) + ' · ' + esc(modeLabel(x.mode)) + '</div>' +
+        '<div class="s-name">' + esc(dt(x.finishedAt || x.startedAt)) + ' · ' + esc(invLabel(x)) + '</div>' +
         '<div class="small-text">' + esc(x.finishedBy || x.worker || '') +
-        (x.status === 'closed' && x.missing ? ' · не відскановано: ' + esc(x.missing) : '') + '</div></span>' + badge + '</button>';
+        (x.status === 'closed' && x.missing ? (x.source === 'file' ? ' · не знайдено з файлу: ' : ' · не відскановано: ') + esc(x.missing) : '') +
+        '</div></span>' + badge + '</button>';
     }).join('');
   }
 
@@ -1517,7 +1547,8 @@
     if (id) {
       var x = (invh.list || state.openInventories).filter(function (y) { return y.id === id; })[0];
       if (!x) return;
-      startInventoryLocal({ id: x.id, mode: x.mode, startedAt: x.startedAt, items: [], joined: true });
+      startInventoryLocal({ id: x.id, mode: x.mode, startedAt: x.startedAt, items: [], joined: true,
+        source: x.source || 'scan', fileName: x.fileName || '' });
       return;
     }
     openInvReport(b.getAttribute('data-report'), 'list');
@@ -1530,6 +1561,7 @@
     b.onclick = function () {
       if (state.session) { toast('Спершу завершіть приймання поставки', 3500); return; }
       var mode = b.getAttribute('data-mode');
+      if (mode === 'file') { openInvFile(); return; }
       var open = (invh.list ? invh.list.filter(function (x) { return x.status === 'open'; }) : state.openInventories);
       if (open.length && !confirm('Вже триває інвентаризація (' + (open[0].worker || '—') + '). Краще приєднатися до неї. ' +
         'Все одно почати нову?')) return;
@@ -1544,8 +1576,197 @@
   function startInventoryLocal(invState) {
     state.inventory = invState;
     saveInventory();
+    if (invState.source === 'file') loadExpected(invState.id);
     openScan();
   }
+
+  /** Кількості з файлу — на телефон, щоб картка товару показувала «за файлом: N» і без звʼязку. */
+  function loadExpected(id) {
+    if (state.invExpected && state.invExpected.id === id) return Promise.resolve(state.invExpected);
+    if (!navigator.onLine) return Promise.resolve(null);
+    return api('inventoryExpected', { inventoryId: id }, 60000).then(function (r) {
+      var map = {};
+      (r.expected || []).forEach(function (x) { map[bKey(x[0])] = [x[1], x[2]]; });
+      state.invExpected = { id: id, map: map, n: (r.expected || []).length };
+      LS.set('invExp', state.invExpected);
+      return state.invExpected;
+    }, function () { return null; });
+  }
+
+  function expectedFor(barcode) {
+    var inv = state.inventory, e = state.invExpected;
+    if (!inv || inv.source !== 'file' || !e || e.id !== inv.id) return undefined;   // невідомо (ще не завантажено)
+    return e.map[bKey(barcode)] || null;
+  }
+
+  // --- Нова інвентаризація за файлом (D-19, власник і менеджер) ---------------
+  var invFile = { table: null, file: '', header: true, map: { b: -1, q: -1, n: -1, a: -1 }, mode: 'qty', check: null, busy: false, id: '' };
+
+  function openInvFile() {
+    if (!isManager()) return;
+    $('invFileCard').hidden = false;
+    $('invNewCard').hidden = true;
+    renderInvFile();
+  }
+  $('btnInvFileClose').onclick = function () {
+    $('invFileCard').hidden = true;
+    invFile.table = null; invFile.check = null;
+    $('invFileOut').innerHTML = '';
+    renderInventoryHome();
+  };
+  $('btnInvFilePick').onclick = function () { $('invFileInput').value = ''; $('invFileInput').click(); };
+  $('invFileInput').addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    if (!file) return;
+    invFile.file = file.name; invFile.check = null; invFile.id = '';
+    $('invFileOut').innerHTML = '<div class="status wait"><span class="spinner"></span>Читаю файл…</div>';
+    readTable(file).then(function (table) {
+      table = table.filter(function (r) { return r.some(function (c) { return String(c).trim() !== ''; }); });
+      if (!table.length) throw new Error('Файл порожній');
+      invFile.table = table;
+      guessFileColumns();
+      renderInvFile();
+    }).catch(function (err) {
+      $('invFileOut').innerHTML = '<div class="status bad">' + esc(err.message || 'Не вдалося прочитати файл') + '</div>';
+    });
+  });
+
+  function guessFileColumns() {
+    var t = invFile.table, head = t[0].map(function (c) { return String(c).toLowerCase(); });
+    var used = [];
+    var find = function (re) {
+      for (var i = 0; i < head.length; i++) if (used.indexOf(i) < 0 && re.test(head[i])) { used.push(i); return i; }
+      return -1;
+    };
+    var m = { b: find(/штрих|barcode|ean|шк\b|bar code/) };
+    m.q = find(/кільк|к-сть|кол-во|колич|залиш|qty|quantity|amount|^шт\.?$/);
+    m.n = find(/назва|найменування|name|товар/);
+    m.a = find(/артикул|article|sku|код товару|^код$/);
+    invFile.header = m.b >= 0 || m.q >= 0 || m.n >= 0;
+    var cols = Math.max.apply(null, t.map(function (r) { return r.length; }));
+    var sample = t.slice(invFile.header ? 1 : 0, 60);
+    if (m.b < 0) {
+      var best = -1, bestN = 0;
+      for (var c = 0; c < cols; c++) {
+        var n = sample.filter(function (r) { return /^\d{8,14}$/.test(String(r[c] || '').replace(/\s/g, '')); }).length;
+        if (n > bestN) { bestN = n; best = c; }
+      }
+      m.b = best;
+    }
+    if (m.q < 0) {
+      // Колонка з невеликими числами (не штрих-код).
+      for (var k = cols - 1; k >= 0; k--) {
+        if (k === m.b) continue;
+        var nn = sample.filter(function (r) { return /^\d{1,6}([.,]\d+)?$/.test(String(r[k] || '').trim()); }).length;
+        if (nn && nn >= sample.length * 0.6) { m.q = k; break; }
+      }
+    }
+    ['n', 'a', 'q'].forEach(function (k) { if (m[k] === m.b) m[k] = -1; });
+    invFile.map = m;
+  }
+
+  function invFileRows() {
+    var t = invFile.table, m = invFile.map;
+    return t.slice(invFile.header ? 1 : 0).map(function (r) {
+      return {
+        barcode: String(r[m.b] || '').replace(/\s/g, ''), qty: String(r[m.q] == null ? '' : r[m.q]).trim(),
+        name: m.n >= 0 ? r[m.n] : '', article: m.a >= 0 ? r[m.a] : ''
+      };
+    }).filter(function (r) { return r.barcode; });
+  }
+
+  function renderInvFile() {
+    var t = invFile.table;
+    if (!t) { $('invFileOut').innerHTML = ''; return; }
+    var cols = Math.max.apply(null, t.map(function (r) { return r.length; }));
+    var labels = [];
+    for (var c = 0; c < cols; c++) {
+      var name = invFile.header ? String(t[0][c] || '').trim() : '';
+      labels.push((c + 1) + (name ? ' — ' + name : '') + (invFile.header ? '' : ' (' + String((t[0] || [])[c] || '').slice(0, 20) + ')'));
+    }
+    var sel = function (key, label, optional) {
+      return '<label class="field">' + label + '<select data-fmap="' + key + '">' +
+        (optional ? '<option value="-1">— немає —</option>' : '<option value="-1">— оберіть —</option>') +
+        labels.map(function (l, i) { return '<option value="' + i + '"' + (invFile.map[key] === i ? ' selected' : '') + '>' + esc(l) + '</option>'; }).join('') +
+        '</select></label>';
+    };
+    var ready = invFile.map.b >= 0 && invFile.map.q >= 0;
+    var rows = ready ? invFileRows() : [];
+    var sci = rows.filter(function (r) { return /e\+/i.test(r.barcode); }).length;
+    var h = '<div class="small-text">' + esc(invFile.file) + ' · рядків: ' + (t.length - (invFile.header ? 1 : 0)) + '</div>' +
+      '<label class="check-row"><input type="checkbox" id="ifHeader"' + (invFile.header ? ' checked' : '') + '><span class="c-body">Перший рядок — заголовки</span></label>' +
+      sel('b', 'Колонка зі штрих-кодом', false) + sel('q', 'Колонка з кількістю', false) +
+      sel('n', 'Колонка з назвою', true) + sel('a', 'Колонка з артикулом', true) +
+      '<div class="small-text">Що рахуємо</div><div class="two">' +
+      '<button class="btn' + (invFile.mode === 'qty' ? ' primary' : '') + '" data-fmode="qty">🔢 Тільки кількість</button>' +
+      '<button class="btn' + (invFile.mode === 'dates' ? ' primary' : '') + '" data-fmode="dates">📅 Кількість + дати</button></div>' +
+      '<p class="hint">' + (invFile.mode === 'dates' ? 'По кожній даті. Після завершення залишки партій порахованих товарів у календарі стануть фактичними.'
+        : 'Залишки партій у базі не змінюються — лише звірка з файлом і файл для бухгалтерії.') + '</p>';
+    if (sci) h += '<div class="status bad">У ' + sci + ' штрих-кодах Excel зіпсував число (вигляд 4,82E+12). Відформатуйте колонку як текст і збережіть файл ще раз.</div>';
+    var c2 = invFile.check;
+    if (!c2) {
+      h += '<button class="btn primary" id="btnIfCheck"' + (!ready || !rows.length || invFile.busy ? ' disabled' : '') + '>🔍 Перевірити файл (' + rows.length + ')</button>';
+    } else {
+      h += '<div class="recon-sum"><span class="badge">товарів: ' + c2.products + '</span><span class="badge">усього: ' + esc(numText(c2.totalQty)) + ' шт</span>' +
+        '<span class="badge ok">є в базі: ' + c2.known + '</span>' + (c2.unknown ? '<span class="badge warn">немає в базі: ' + c2.unknown + '</span>' : '') + '</div>';
+      if (c2.duplicates) h += '<div class="status warn">Штрих-кодів, що повторюються у файлі: ' + c2.duplicates + ' — їх кількість складено.</div>';
+      if (c2.badQty) {
+        h += '<div class="status bad">Рядків без правильної кількості: ' + c2.badQty + ' — їх пропущено' +
+          (c2.samples.bad.length ? ' (' + c2.samples.bad.slice(0, 5).map(esc).join(', ') + ')' : '') + '.</div>';
+      }
+      if (c2.unknown) {
+        h += '<p class="hint">Товари, яких немає в базі, теж рахуються: під час сканування назва підставиться з файлу (якщо є).</p><ul class="items">' +
+          c2.samples.unknown.slice(0, 5).map(function (x) {
+            return '<li><div><div class="inv-name">' + esc(x.name || '(без назви)') + '</div><div class="dates">' + esc(x.barcode) + '</div></div>' +
+              '<span class="qty">' + esc(numText(x.qty)) + '</span></li>';
+          }).join('') + '</ul>';
+      }
+      h += '<button class="btn primary" id="btnIfStart"' + (invFile.busy || !c2.products ? ' disabled' : '') + '>▶ Почати інвентаризацію за файлом</button>';
+    }
+    $('invFileOut').innerHTML = h;
+  }
+
+  $('invFileOut').addEventListener('change', function (ev) {
+    var k = ev.target.getAttribute && ev.target.getAttribute('data-fmap');
+    if (k) { invFile.map[k] = +ev.target.value; invFile.check = null; renderInvFile(); return; }
+    if (ev.target.id === 'ifHeader') { invFile.header = ev.target.checked; invFile.check = null; renderInvFile(); }
+  });
+  $('invFileOut').addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('button');
+    if (!t || t.disabled || invFile.busy) return;
+    var fm = t.getAttribute('data-fmode');
+    if (fm) { invFile.mode = fm; renderInvFile(); return; }
+    if (t.id !== 'btnIfCheck' && t.id !== 'btnIfStart') return;
+    var apply = t.id === 'btnIfStart';
+    if (apply) {
+      if (state.session) { toast('Спершу завершіть приймання поставки', 3500); return; }
+      var open = (invh.list ? invh.list.filter(function (x) { return x.status === 'open'; }) : state.openInventories);
+      if (open.length && !confirm('Вже триває інвентаризація (' + (open[0].worker || '—') + '). Все одно почати нову за файлом?')) return;
+      if (!confirm('Почати інвентаризацію за файлом «' + invFile.file + '» (' + modeLabel(invFile.mode) + ')?')) return;
+      if (!invFile.id) invFile.id = uuid();
+    }
+    if (!navigator.onLine) { toast('Потрібен інтернет', 3500); return; }
+    invFile.busy = true;
+    renderInvFile();
+    var startedAt = new Date().toISOString();
+    api('startFileInventory', {
+      inventoryId: apply ? invFile.id : '', mode: invFile.mode, fileName: invFile.file, startedAt: startedAt,
+      rows: invFileRows(), apply: apply
+    }, 120000).then(function (r) {
+      invFile.check = r.check;
+      if (apply) {
+        var id = invFile.id;
+        $('invFileCard').hidden = true;
+        invFile.table = null; invFile.check = null; invFile.id = '';
+        $('invFileOut').innerHTML = '';
+        invh.list = null;
+        toast('Інвентаризацію за файлом розпочато', 3000);
+        startInventoryLocal({ id: id, mode: invFile.mode, startedAt: startedAt, items: [], source: 'file', fileName: invFile.file });
+      }
+    }, function (err) {
+      toast(err.network ? 'Немає звʼязку з сервером' : err.message, 5000);
+    }).finally(function () { invFile.busy = false; if (!$('invFileCard').hidden) renderInvFile(); });
+  });
 
   /** Скільки вже пораховано цього товару: сервер (якщо відповів) + невідправлене з телефона, з урахуванням «Замінити». */
   function localCounted(barcode, serverTotal) {
@@ -1589,6 +1810,14 @@
     $('invQtyField').hidden = !inv || it.mode !== 'qty';
     $('invBatches').hidden = !inv || it.mode !== 'dates';
     $('invCounted').hidden = !inv || it.ctxLoading || !(it.counted && it.counted.total > 0);
+    var isFile = inv && state.inventory && state.inventory.source === 'file';
+    $('invFileInfo').hidden = !isFile;
+    if (isFile) {
+      var ex = it.expected;
+      $('invFileInfo').innerHTML = ex === undefined ? '<div class="status wait">📄 Файл ще не завантажено на телефон (немає звʼязку).</div>'
+        : ex ? '<div class="status ok">📄 За файлом: <b>' + esc(numText(ex[0])) + ' шт</b></div>'
+          : '<div class="status warn">📄 Цього товару немає у файлі — все одно порахуйте, він піде в «немає у файлі».</div>';
+    }
     $('btnAddEntry').hidden = inv && it.mode !== 'dates';
     $('btnAddEntry').textContent = inv ? '➕ Інша дата (якої немає в списку)' : '➕ Ще одна дата цього товару';
     if (!inv) return;
@@ -1774,6 +2003,7 @@
     }
     var inv = d.inventory, lines = d.lines || [];
     var closed = inv.status === 'closed';
+    if (inv.source === 'file') { renderFileReport(d); return; }
     var counted = lines.filter(function (l) { return l.counted; });
     var missing = lines.filter(function (l) { return !l.counted; });
     var fresh = counted.filter(function (l) { return l.new || !l.base; });
@@ -1837,6 +2067,81 @@
     $('irLists').innerHTML = h;
   }
 
+  /** Звіт інвентаризації за файлом (D-19): звірка «фактично — за файлом». */
+  function renderFileReport(d) {
+    var inv = d.inventory, lines = d.lines || [];
+    var closed = inv.status === 'closed';
+    var groups = { short: [], over: [], missing: [], extra: [], ok: [] };
+    lines.forEach(function (l) {
+      if (!l.counted) groups.missing.push(l);
+      else if (!l.inFile) groups.extra.push(l);
+      else {
+        var df = Math.round((l.q - l.exp) * 1000) / 1000;
+        l.diff = df;
+        (df < 0 ? groups.short : df > 0 ? groups.over : groups.ok).push(l);
+      }
+    });
+    var counted = lines.filter(function (l) { return l.counted; });
+    var total = counted.reduce(function (s, l) { return s + l.q; }, 0);
+    var expTotal = lines.reduce(function (s, l) { return s + (l.exp || 0); }, 0);
+    $('irTitle').textContent = (closed ? 'Інвентаризація за файлом від ' : 'Інвентаризація за файлом (триває) · ') + dt(inv.finishedAt || inv.startedAt);
+    $('irSub').textContent = (inv.fileName ? '«' + inv.fileName + '» · ' : '') + modeLabel(inv.mode) + ' · рахували: ' + (d.workers || inv.worker || '—') +
+      (closed ? ' · завершив(ла) ' + (inv.finishedBy || '—') : '');
+    var b = ['<span class="badge">пораховано: ' + total + ' шт</span>', '<span class="badge">за файлом: ' + esc(numText(expTotal)) + ' шт</span>',
+      '<span class="badge ok">збігається: ' + groups.ok.length + '</span>'];
+    if (groups.short.length) b.push('<span class="badge bad">нестача: ' + groups.short.length + '</span>');
+    if (groups.over.length) b.push('<span class="badge warn">надлишок: ' + groups.over.length + '</span>');
+    if (groups.missing.length) b.push('<span class="badge bad">не знайдено: ' + groups.missing.length + '</span>');
+    if (groups.extra.length) b.push('<span class="badge warn">немає у файлі: ' + groups.extra.length + '</span>');
+    $('irBadges').innerHTML = b.join('');
+
+    var a = '';
+    if (!closed) {
+      var mine = state.inventory && state.inventory.id === inv.id;
+      if (mine) a += '<button class="btn" id="btnIrBack">↩ Повернутися до підрахунку</button>';
+      if (isManager()) {
+        a += '<button class="btn primary" id="btnIrFinish"' + (ir.busy ? ' disabled' : '') + '>✅ Завершити інвентаризацію</button>';
+      }
+      a += '<p class="hint">' + (inv.mode === 'dates'
+        ? 'Після завершення залишки порахованих товарів у календарі стануть фактичними. '
+        : 'Залишки в базі не змінюються — лише звірка й файл для бухгалтерії. ') +
+        (isManager() ? 'Поки не завершено, рахувати можна з кількох телефонів.' : 'Завершує власник або менеджер.') + '</p>';
+    } else {
+      a += '<div class="two"><button class="btn primary" data-file="pdf"' + (ir.busy ? ' disabled' : '') + '>📄 PDF</button>' +
+        '<button class="btn primary" data-file="xlsx"' + (ir.busy ? ' disabled' : '') + '>📊 Excel</button></div>' +
+        '<p class="hint">Файл: штрих-код · артикул · назва · фактично · за файлом · різниця; окремо — що є у файлі, але не знайдено.</p>';
+    }
+    $('irActions').innerHTML = a;
+    renderIrFiles();
+
+    var row = function (l, right, cls) {
+      return '<li' + (cls ? ' class="' + cls + '"' : '') + '><div><div class="inv-name">' + esc(l.n) + '</div><div class="dates">' + esc(l.b) +
+        (l.a ? ' · арт. ' + esc(l.a) : '') + '</div></div><span class="qty">' + right + '</span></li>';
+    };
+    var grp = function (title, cls, items, fn, open) {
+      if (!items.length) return '';
+      return '<div class="recon-group"><h3 class="' + cls + '">' + title + ' (' + items.length + ')</h3><ul class="items">' +
+        items.map(fn).join('') + '</ul>' + (open || '') + '</div>';
+    };
+    var h = '';
+    h += grp('🔻 Нестача', 'bad', groups.short, function (l) {
+      return row(l, l.q + ' з ' + esc(numText(l.exp)) + ' <b>' + esc(numText(l.diff)) + '</b>', 'bad');
+    });
+    h += grp('❌ Є у файлі, але не знайдено', 'bad', groups.missing, function (l) {
+      return row(l, 'за файлом ' + esc(numText(l.exp)), 'bad');
+    }, closed ? '' : '<p class="hint">Перевірте полиці й склад. Знайшли — відскануйте.</p>');
+    h += grp('🔺 Надлишок', 'warn', groups.over, function (l) {
+      return row(l, l.q + ' з ' + esc(numText(l.exp)) + ' <b>+' + esc(numText(l.diff)) + '</b>', 'warn');
+    });
+    h += grp('➕ Знайдено, але немає у файлі', 'warn', groups.extra, function (l) { return row(l, l.q + ' шт', 'warn'); });
+    if (groups.ok.length) {
+      h += '<details class="recon-ok"' + (groups.ok.length <= 30 && !groups.short.length ? ' open' : '') + '><summary>✅ Збігається (' + groups.ok.length + ')</summary><ul class="items">' +
+        groups.ok.map(function (l) { return row(l, l.q + ' шт', ''); }).join('') + '</ul></details>';
+    }
+    if (!counted.length) h += '<div class="card muted">Ще нічого не пораховано.</div>';
+    $('irLists').innerHTML = h;
+  }
+
   $('irActions').addEventListener('click', function (ev) {
     var t = ev.target.closest && ev.target.closest('button');
     if (!t || t.disabled) return;
@@ -1850,7 +2155,8 @@
     var d = ir.data;
     if (!d || ir.busy) return;
     var missing = (d.lines || []).filter(function (l) { return !l.counted; }).length;
-    var msg = 'Завершити інвентаризацію?' + (missing ? '\nНе відскановано товарів із залишком: ' + missing + '.' : '') +
+    var isFile = d.inventory.source === 'file';
+    var msg = 'Завершити інвентаризацію?' + (missing ? (isFile ? '\nНе знайдено товарів із файлу: ' : '\nНе відскановано товарів із залишком: ') + missing + '.' : '') +
       (d.inventory.mode === 'dates' ? '\nЗалишки порахованих товарів у базі буде замінено фактичними.' : '') +
       '\nПісля завершення рахувати вже не можна.';
     if (!confirm(msg)) return;
@@ -1861,6 +2167,7 @@
     sentBefore().then(function () { return api('finishInventory', { inventoryId: id }, 120000); }).then(function (r) {
       ir.data = r;
       if (state.inventory && state.inventory.id === id) { state.inventory = null; saveInventory(); }
+      if (state.invExpected && state.invExpected.id === id) { state.invExpected = null; LS.del('invExp'); }
       // Залишки в календарі змінились — перезавантажимо при наступному відкритті.
       cal.data = null; LS.del('calendar');
       invh.list = null;
@@ -2102,6 +2409,9 @@
     $('setUser').textContent = state.user ? state.user.name : '';
     $('setUrl').textContent = state.api;
     $('setVersion').textContent = 'сторінка ' + APP_VERSION + (state.serverVersion ? ', сервер ' + state.serverVersion : '');
+    $('setUser').textContent = (state.user ? state.user.name : '') + ' · ' + (ROLE[state.role] || ROLE.worker);
+    $('btnWorkers').hidden = !isManager();
+    $('catCard').hidden = !isManager();
     show('scrSettings', 'Налаштування');
   };
   $('btnBack').onclick = function () {
@@ -2111,6 +2421,7 @@
     }
     if (current === 'scrMonth') { showCalendar(); return; }
     if (current === 'scrInvoice' && inv.from === 'list') { showInvoices(false); return; }
+    if (current === 'scrWorkers') { $('btnSettings').click(); return; }
     if (current === 'scrInvReport') {
       if (ir.from === 'scan' && state.inventory && state.inventory.id === ir.id) { openScan(); return; }
       showInventory(false); return;
@@ -2179,11 +2490,125 @@
           !confirm('Є незавершене приймання або невідправлені дані. Вони залишаться в телефоні. Вийти?')) return;
       state.user = null;
       LS.del('user');
+      LS.del('role');
+      state.role = 'worker';
       LS.del('calendar');
       cal.data = null;
       goHome();
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Працівники (D-18): власник — усі; менеджер — лише роль «Працівник»
+  // ---------------------------------------------------------------------------
+  var ROLE = { owner: '👑 Власник', manager: '🧭 Менеджер', worker: '👤 Працівник' };
+  var wk = { list: null, me: 0, edit: null, busy: false };
+
+  $('btnWorkers').onclick = function () { show('scrWorkers', 'Працівники'); wk.edit = null; renderWorkerForm(); loadWorkers(); };
+  $('btnWkRefresh').onclick = function () { loadWorkers(); };
+  $('btnWkAdd').onclick = function () { wk.edit = { id: null, name: '', role: 'worker', active: true }; renderWorkerForm(); };
+
+  function loadWorkers() {
+    if (!navigator.onLine) { $('wkMsg').textContent = 'Немає звʼязку з сервером.'; return; }
+    $('wkMsg').innerHTML = '<span class="spinner"></span>Завантажую…';
+    $('btnWkRefresh').disabled = true;
+    api('workers').then(function (r) {
+      wk.list = r.workers || []; wk.me = r.me;
+      $('wkMsg').textContent = '';
+      renderWorkers();
+    }, function (err) {
+      $('wkMsg').textContent = err.network ? 'Немає звʼязку з сервером.' : err.message;
+      if (/PIN/.test(err.message)) logout(true);
+    }).finally(function () { $('btnWkRefresh').disabled = false; });
+  }
+
+  function renderWorkers() {
+    var l = wk.list || [];
+    var act = l.filter(function (w) { return w.active; }).length;
+    $('wkSub').textContent = 'Активних: ' + act + (l.length > act ? ', вимкнених: ' + (l.length - act) : '');
+    $('btnWkAdd').hidden = !!wk.edit;
+    $('wkList').innerHTML = l.map(function (w) {
+      var sub = (ROLE[w.role] || w.role) + (w.id === wk.me ? ' · це ви' : '') +
+        ' · ' + (w.lastLoginAt ? 'входив(ла) ' + dt(w.lastLoginAt) : 'ще не входив(ла)') + (w.weakPin ? ' · короткий PIN' : '');
+      return '<button class="sess-btn' + (w.active ? '' : ' off') + '" data-wk="' + w.id + '"' + (w.canEdit ? '' : ' disabled') + '>' +
+        '<span class="s-main"><div class="s-name">' + esc(w.name) + '</div><div class="small-text">' + esc(sub) + '</div></span>' +
+        (w.active ? '<span class="badge ok">активний</span>' : '<span class="badge">вимкнено</span>') + '</button>';
+    }).join('');
+  }
+
+  $('wkList').addEventListener('click', function (ev) {
+    var b = ev.target.closest && ev.target.closest('[data-wk]');
+    if (!b || b.disabled) return;
+    var id = +b.getAttribute('data-wk');
+    var w = (wk.list || []).filter(function (x) { return x.id === id; })[0];
+    if (!w) return;
+    wk.edit = { id: w.id, name: w.name, role: w.role, active: w.active, self: w.id === wk.me };
+    renderWorkerForm();
+    window.scrollTo(0, 0);
+  });
+
+  function renderWorkerForm() {
+    var e = wk.edit, f = $('wkForm');
+    f.hidden = !e;
+    $('btnWkAdd').hidden = !!e;
+    if (!e) { f.innerHTML = ''; return; }
+    var isNew = e.id == null;
+    var roles = state.role === 'owner' ? ['worker', 'manager', 'owner'] : ['worker'];
+    var h = '<div class="item-head"><div><b>' + (isNew ? '➕ Новий працівник' : '✏ ' + esc(e.name)) + '</b></div>' +
+      '<button class="icon-btn" data-wkf="close" aria-label="Закрити">✕</button></div>' +
+      '<label class="field">Імʼя<input id="wkName" type="text" maxlength="60" autocomplete="off" value="' + esc(e.name) + '"></label>';
+    if (!e.self) {
+      h += '<label class="field">Роль<select id="wkRole">' + roles.map(function (r) {
+        return '<option value="' + r + '"' + (e.role === r ? ' selected' : '') + '>' + ROLE[r] + '</option>';
+      }).join('') + '</select></label>' +
+        '<p class="hint">Працівник: приймання й підрахунок. Менеджер: ще працівники, інвентаризація за файлом, імпорт довідника. Власник: усе.</p>';
+    }
+    h += '<label class="field">' + (isNew ? 'PIN (від 6 символів)' : 'Новий PIN (порожньо — не змінювати)') +
+      '<input id="wkPin" class="pin small-pin" type="password" inputmode="numeric" maxlength="32" autocomplete="new-password"></label>' +
+      '<p class="hint">Повідомте PIN працівнику особисто. Він зможе змінити його сам: ⚙ → «Змінити PIN».</p>';
+    h += '<button class="btn primary" data-wkf="save"' + (wk.busy ? ' disabled' : '') + '>' + (isNew ? 'Додати' : 'Зберегти') + '</button>';
+    if (!isNew && !e.self) {
+      h += e.active ? '<button class="btn danger" data-wkf="off"' + (wk.busy ? ' disabled' : '') + '>⛔ Вимкнути доступ</button>'
+        : '<button class="btn" data-wkf="on"' + (wk.busy ? ' disabled' : '') + '>✅ Увімкнути доступ</button>';
+      h += '<p class="hint">Вимкнений працівник не зможе увійти (протягом ~2 хв). Його записи й імʼя в історії залишаться.</p>';
+    }
+    h += '<p class="hint error" id="wkFormMsg"></p>';
+    f.innerHTML = h;
+  }
+
+  $('wkForm').addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('[data-wkf]');
+    if (!t || t.disabled || wk.busy) return;
+    var act = t.getAttribute('data-wkf'), e = wk.edit;
+    if (act === 'close') { wk.edit = null; renderWorkerForm(); return; }
+    var w = { id: e.id };
+    var msg = $('wkFormMsg');
+    if (act === 'save') {
+      var name = $('wkName').value.trim(), pin = $('wkPin').value.trim();
+      if (!name) { msg.textContent = 'Вкажіть імʼя.'; return; }
+      if (e.id == null && !pin) { msg.textContent = 'Вкажіть PIN.'; return; }
+      if (pin && pin.length < 6) { msg.textContent = 'PIN має бути від 6 символів.'; return; }
+      w.name = name;
+      if (pin) w.pin = pin;
+      if ($('wkRole')) w.role = $('wkRole').value;
+      if (w.role === 'owner' && e.role !== 'owner' && !confirm('Зробити «' + name + '» власником? Власник має всі права, зокрема керує менеджерами.')) return;
+    } else {
+      if (act === 'off' && !confirm('Вимкнути доступ для «' + e.name + '»?')) return;
+      w.active = act === 'on';
+    }
+    wk.busy = true;
+    renderWorkerForm();
+    api('saveWorker', { worker: w }).then(function (r) {
+      toast(e.id == null ? 'Працівника додано: ' + r.worker.name : 'Збережено ✓');
+      wk.edit = null;
+      loadWorkers();
+    }, function (err) {
+      wk.busy = false;
+      renderWorkerForm();
+      $('wkFormMsg').textContent = err.network ? 'Немає звʼязку з сервером.' : err.message;
+      return;
+    }).finally(function () { wk.busy = false; if (!wk.edit) renderWorkerForm(); });
+  });
 
   // Повернення до екрана приймання запускає сканер.
   var origShow = show;

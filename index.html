@@ -107,6 +107,13 @@
         <p class="hint" id="invNewHint">Оберіть, що рахуємо. Поки триває інвентаризація, приймання на цьому телефоні вимкнено.</p>
         <button class="btn mode-btn" data-mode="qty"><b>🔢 Тільки кількість</b><span>Скан → кількість → далі. Залишки партій у базі не змінюються.</span></button>
         <button class="btn mode-btn" data-mode="dates"><b>📅 Кількість + дати</b><span>Видно партії з бази — вводите фактичну кількість по кожній даті. Після завершення залишки в календарі стануть фактичними.</span></button>
+        <button class="btn mode-btn" id="btnInvFile" data-mode="file" hidden><b>📄 За файлом з офісу</b><span>Завантажте файл (Excel або CSV) зі штрих-кодами й кількістю — рахуєте й бачите, що збігається, а де нестача чи надлишок.</span></button>
+      </div>
+      <div class="card" id="invFileCard" hidden>
+        <div class="item-head"><div><b>📄 Інвентаризація за файлом</b></div><button class="icon-btn" id="btnInvFileClose" aria-label="Закрити">✕</button></div>
+        <p class="hint">Файл Excel (.xlsx) або CSV: колонка зі штрих-кодом і колонка з кількістю; назва й артикул — якщо є. Спершу перевірка, потім старт.</p>
+        <button class="btn" id="btnInvFilePick">📄 Обрати файл</button>
+        <div id="invFileOut"></div>
       </div>
       <div class="cal-bar">
         <h2 class="list-title">Останні інвентаризації</h2>
@@ -127,6 +134,18 @@
       <div id="irActions"></div>
       <div id="irFiles"></div>
       <div id="irLists"></div>
+    </section>
+
+    <!-- Працівники (власник, менеджер) -->
+    <section class="screen" id="scrWorkers" hidden>
+      <div class="cal-bar">
+        <span class="small-text" id="wkSub"></span>
+        <button class="btn small" id="btnWkRefresh">↻ Оновити</button>
+      </div>
+      <button class="btn primary" id="btnWkAdd">➕ Додати працівника</button>
+      <div class="card" id="wkForm" hidden></div>
+      <div id="wkList"></div>
+      <p class="hint" id="wkMsg"></p>
     </section>
 
     <!-- Початок сесії -->
@@ -177,6 +196,7 @@
           </label>
         </div>
 
+        <div id="invFileInfo" hidden></div>
         <div id="invCounted" hidden></div>
         <div id="invBatches" hidden></div>
         <label class="field" id="invQtyField" hidden>Кількість, шт
@@ -220,7 +240,8 @@
         <button class="btn" id="btnChangePin">Змінити PIN</button>
         <p class="hint" id="pinMsg"></p>
       </div>
-      <div class="card">
+      <button class="btn" id="btnWorkers" hidden>👥 Працівники</button>
+      <div class="card" id="catCard">
         <div><b>📥 Імпорт довідника з офісу</b></div>
         <p class="hint">Файл Excel (.xlsx) або CSV зі штрих-кодами, артикулами й назвами. Товари зіставляються за штрих-кодом; спершу буде перевірка, без змін у базі.</p>
         <button class="btn" id="btnCatFile">📄 Обрати файл</button>
@@ -234,6 +255,7 @@
 
   <input type="file" id="fileInput" accept="image/*" capture="environment" hidden>
   <input type="file" id="catFileInput" accept=".xlsx,.xls,.csv,text/csv" hidden>
+  <input type="file" id="invFileInput" accept=".xlsx,.xls,.csv,text/csv" hidden>
   <div class="toast" id="toast" hidden></div>
 
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
