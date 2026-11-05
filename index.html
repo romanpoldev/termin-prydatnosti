@@ -155,11 +155,15 @@
       <label class="field">Або впишіть постачальника
         <input id="supplierInput" type="text" autocomplete="off">
       </label>
-      <button class="btn primary" id="btnSessionGo">Почати</button>
+      <button class="btn primary big" id="btnSessionInv">📷 Почати з накладною</button>
+      <button class="btn" id="btnSessionGo">Почати без накладної</button>
+      <p class="hint">З накладною: спершу фото накладної — постачальник і назви товарів підтягнуться з неї, під час сканування видно
+        кількість за накладною. Постачальника тоді можна не вибирати.</p>
     </section>
 
     <!-- Приймання -->
     <section class="screen" id="scrScan" hidden>
+      <div id="rcvInvoice" hidden></div>
       <div class="session-bar">
         <span id="sessionInfo"></span>
         <button class="btn small" id="btnFinish">🏁 Завершити</button>
@@ -184,6 +188,7 @@
           <button class="icon-btn" id="btnCancelItem" aria-label="Скасувати">✕</button>
         </div>
 
+        <div id="rcvLineInfo" hidden></div>
         <div id="newProduct" hidden>
           <p class="hint" id="newProductHint">Новий товар. Сфотографуйте лицьову сторону — назву сформує ШІ.</p>
           <button class="btn" id="btnNamePhoto">📷 Фото товару</button>

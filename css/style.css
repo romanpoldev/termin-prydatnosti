@@ -251,3 +251,10 @@ a.btn { text-decoration: none; box-sizing: border-box; }
 .cal-bar .list-title { margin: 0; }
 
 .pin.small-pin { font-size: 20px; letter-spacing: 4px; }
+/* Накладна на початку приймання (D-20) */
+.rcv { display: flex; flex-direction: column; gap: 6px; }
+.rcv-progress { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.rcv-progress .bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.rcv-progress .bar span { display: block; height: 100%; background: var(--brand); }
+.line-pick { margin-top: 6px; padding: 8px 10px; }
+.line-pick .s-name { font-weight: 500; }

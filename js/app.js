@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '4.2.0';
+  var APP_VERSION = '4.3.0';
   // Сервер за замовчуванням (Supabase). Інший можна задати в налаштуваннях або посиланням ?api=
   var DEFAULT_API = 'https://zsxwxaosspbjltmvdtpc.supabase.co/functions/v1/api';
   var API_RE = /^https:\/\/([a-z0-9-]+\.supabase\.co\/functions\/v1\/|script\.google(usercontent)?\.com\/).+/;
@@ -303,7 +303,7 @@
 
   function applyBootstrap(r) {
     var products = {};
-    (r.products || []).forEach(function (p) { if (p.b) products[p.b] = { n: p.n, c: p.c }; });
+    (r.products || []).forEach(function (p) { if (p.b) products[p.b] = { n: p.n, c: p.c, a: p.a || '' }; });
     state.data = { suppliers: r.suppliers || [], categories: r.categories || [], products: products };
     state.serverVersion = r.version || '';
     state.openInventories = r.openInventories || [];
@@ -358,28 +358,39 @@
   }
   $('supplierInput').addEventListener('input', function () { chosenSupplier = ''; renderSuppliers(); });
 
-  $('btnSessionGo').onclick = function () {
+  $('btnSessionGo').onclick = function () { startReceiving(false); };
+  $('btnSessionInv').onclick = function () { startReceiving(true); };
+
+  /** Нова поставка. З накладною (D-20): одразу камера для першої сторінки, постачальник може прийти з накладної. */
+  function startReceiving(withInvoice) {
     var supplier = $('supplierInput').value.trim() || chosenSupplier;
-    if (!supplier) { toast('Оберіть або впишіть постачальника'); return; }
-    state.session = { id: uuid(), supplier: supplier, startedAt: new Date().toISOString(), items: [] };
+    if (!supplier && !withInvoice) { toast('Оберіть або впишіть постачальника'); return; }
+    state.session = {
+      id: uuid(), supplier: supplier, startedAt: new Date().toISOString(), items: [],
+      invoice: withInvoice ? { pages: [], lines: [], supplier: '', docNumber: '', picks: {} } : null
+    };
     saveSession();
-    if (state.data.suppliers.indexOf(supplier) === -1) {
+    if (supplier && state.data.suppliers.indexOf(supplier) === -1) {
       state.data.suppliers.push(supplier);
       LS.set('data', state.data);
     }
     sendOrQueue('startSession', { sessionId: state.session.id, supplier: supplier, startedAt: state.session.startedAt })
       .catch(function (err) { toast(err.message, 4000); });
     openScan();
+    if (withInvoice) takePhoto({ kind: 'rcvInvoice', pageNo: 1 });
   };
 
   $('btnContinue').onclick = openScan;
 
   function openScan() {
     var inv = state.inventory;
-    $('sessionInfo').textContent = inv ? 'Інвентаризація · ' + invLabel(inv) : state.session.supplier;
+    $('sessionInfo').textContent = inv ? 'Інвентаризація · ' + invLabel(inv) : (state.session.supplier || 'Постачальник — з накладної');
     $('listTitle').textContent = inv ? 'Пораховано на цьому телефоні' : 'Прийнято в цій поставці';
     renderSessionItems();
     closeItem();
+    renderRcv();
+    var r = rcv();
+    if (r && !r.lines.length && r.pages.some(function (p) { return p.status === 'done'; }) && navigator.onLine) rcvLoadLines();
     show('scrScan', inv ? 'Інвентаризація' : 'Приймання');
   }
 
@@ -394,6 +405,8 @@
     var n = state.session.items.length;
     if (!confirm('Завершити приймання? Позицій: ' + n)) return;
     var id = state.session.id;
+    var picks = rcvPickList();
+    if (picks.length) inv.pendingPicks = { sessionId: id, picks: picks };
     sendOrQueue('closeSession', { sessionId: id, closedAt: new Date().toISOString() })
       .catch(function (err) { toast(err.message, 4000); });
     var supplier = state.session.supplier;
@@ -421,6 +434,7 @@
       return;
     }
     var items = state.session ? state.session.items : [];
+    if (state.session && state.session.invoice) renderRcv();
     $('listTitle').hidden = !items.length;
     ul.innerHTML = items.slice().reverse().map(function (it) {
       var dates = it.entries.map(function (e) { return e.qty + ' шт до ' + Dates.format(e.date); }).join(' · ');
@@ -560,6 +574,8 @@
             state.item.nameSource = 'existing';
             $('newProduct').hidden = true;
             renderItemHead();
+          } else if (state.item.nameSource === 'invoice') {
+            $('newProductHint').textContent = 'Назва з накладної. Перевірте або сфотографуйте товар.';
           } else if (item.expected && item.expected[1]) {
             $('newProductHint').textContent = 'Назва з файлу. Перевірте або сфотографуйте товар.';
           } else if (r.off && r.off.name) {
@@ -579,6 +595,7 @@
     } else {
       $('newProduct').hidden = true;
     }
+    renderRcvLine();
     if (inv && inv.source === 'file') {
       var ex = expectedFor(barcode);
       if (ex === undefined) {
@@ -824,6 +841,7 @@
     var it = state.item;
     if (!it) return;
     if (it.inv) { $('btnSaveItem').disabled = !invItemValid(it); return; }
+    renderRcvLine();
     var nameOk = it.known || !!(it.name && it.name.trim());
     var entriesOk = it.entries.length > 0 && it.entries.every(function (e) {
       return finalDate(e) && Number(e.qty) > 0 && Number.isInteger(Number(e.qty));
@@ -893,6 +911,261 @@
   };
 
   // ---------------------------------------------------------------------------
+  // Накладна на початку приймання (D-20): фото → ШІ читає у фоні → постачальник, назви, кількість на картці
+  // ---------------------------------------------------------------------------
+  var rcvPending = {};   // номер сторінки → фото, яке ще не вдалося відправити (лише в памʼяті)
+
+  function rcv() { return state.session && !state.inventory ? state.session.invoice : null; }
+  function stripZ(s) { return String(s || '').replace(/\s/g, '').replace(/^0+/, ''); }
+  function rcvPage(n) {
+    var r = rcv(), p = r.pages.filter(function (x) { return x.page === n; })[0];
+    if (!p) { p = { page: n }; r.pages.push(p); r.pages.sort(function (a, b) { return a.page - b.page; }); }
+    return p;
+  }
+
+  function rcvUpload(pageNo, b64) {
+    var r = rcv();
+    if (!r) return;
+    var sid = state.session.id, p = rcvPage(pageNo);
+    p.status = 'reading'; p.error = '';
+    rcvPending[pageNo] = b64;
+    saveSession();
+    renderRcv();
+    flushQueue().then(function () {
+      return api('invoicePage', { sessionId: sid, pageNo: pageNo, image: b64 }, 150000);
+    }).then(function (res) {
+      delete rcvPending[pageNo];
+      if (!state.session || state.session.id !== sid) return;
+      p.status = 'done'; p.lines = res.lines; p.note = res.note || ''; p.uncertain = res.uncertain || 0;
+      saveSession();
+      return rcvLoadLines();
+    }, function (err) {
+      if (!state.session || state.session.id !== sid) return;
+      var retry = err.network || /не збережено на сервері/i.test(err.message);
+      p.status = retry ? 'wait' : 'error';
+      p.error = err.network ? 'Немає звʼязку — відправиться, коли зʼявиться' : err.message;
+      if (!retry) delete rcvPending[pageNo];
+      saveSession();
+      renderRcv();
+    });
+  }
+
+  function rcvRetry() {
+    if (!rcv()) return;
+    Object.keys(rcvPending).forEach(function (k) {
+      var p = rcvPage(+k);
+      if (p.status !== 'reading') rcvUpload(+k, rcvPending[k]);
+    });
+  }
+
+  function rcvLoadLines() {
+    var r = rcv();
+    if (!r) return Promise.resolve();
+    var sid = state.session.id;
+    return api('invoiceLines', { sessionId: sid }, 60000).then(function (res) {
+      if (!state.session || state.session.id !== sid) return;
+      r.lines = res.lines || [];
+      var sup = (res.pages || []).map(function (x) { return x.supplier; }).filter(Boolean)[0] || '';
+      r.supplier = sup;
+      r.docNumber = (res.pages || []).map(function (x) { return x.docNumber; }).filter(Boolean)[0] || '';
+      if (sup && !state.session.supplier) setSessionSupplier(sup);
+      saveSession();
+      renderRcv();
+      if (state.item && !state.item.inv) renderRcvLine();
+    }, function () { /* спробуємо ще раз при наступному фото або «Оновити» */ });
+  }
+
+  function setSessionSupplier(sup) {
+    state.session.supplier = sup;
+    saveSession();
+    $('sessionInfo').textContent = sup;
+    if (state.data.suppliers.indexOf(sup) === -1) { state.data.suppliers.push(sup); LS.set('data', state.data); }
+    sendOrQueue('setSupplier', { sessionId: state.session.id, supplier: sup }).catch(function (err) { toast(err.message, 4000); });
+  }
+
+  /** Чи належить рядок накладної цьому товару: вибір працівника → пара з сервера → код = штрих-код / артикул. */
+  function lineFor(line, barcode) {
+    var r = rcv(), pick = r && r.picks[line.id];
+    if (pick) return pick === barcode;
+    if (line.barcode) return line.barcode === barcode;
+    var c = String(line.code || '').replace(/\s/g, '');
+    if (!c) return false;
+    if (/^\d{6,14}$/.test(c) && stripZ(c) === stripZ(barcode)) return true;
+    var pr = state.data.products[barcode], a = pr && pr.a;
+    return !!a && a.toLowerCase() === c.toLowerCase();
+  }
+  function linesFor(barcode) { var r = rcv(); return r ? r.lines.filter(function (l) { return lineFor(l, barcode); }) : []; }
+  function lineTaken(line) { return state.session.items.some(function (it) { return lineFor(line, it.barcode); }); }
+  function receivedQty(barcode) {
+    return state.session.items.filter(function (x) { return x.barcode === barcode; }).reduce(function (s, x) {
+      return s + x.entries.reduce(function (t, e) { return t + (Number(e.qty) || 0); }, 0);
+    }, 0);
+  }
+  function isPcs(u) { return /^(шт|шт\.|штук|штука|од|од\.|pcs|pc)?$/i.test(String(u || '').trim()); }
+  function toks(s) {
+    return String(s || '').toLowerCase().split(/[^0-9a-zа-яіїєґ]+/).filter(function (t) { return t.length > 1; });
+  }
+  function nameSim(a, b) {
+    var A = toks(a), B = toks(b);
+    if (!A.length || !B.length) return 0;
+    var n = 0;
+    A.forEach(function (t) {
+      if (B.some(function (u) { return u === t || (t.length > 3 && u.length > 3 && u.slice(0, 4) === t.slice(0, 4)); })) n++;
+    });
+    return n / Math.max(A.length, B.length);
+  }
+  /** Пари, які працівник вибрав сам (для звірки на сервері після завершення). */
+  function rcvPickList() {
+    var r = rcv();
+    if (!r) return [];
+    return Object.keys(r.picks).filter(function (id) { return r.picks[id] && r.picks[id] !== '-'; })
+      .map(function (id) { return { id: id, barcode: r.picks[id] }; });
+  }
+
+  function renderRcv() {
+    var box = $('rcvInvoice'), r = rcv();
+    if (!r) { box.hidden = true; return; }
+    box.hidden = false;
+    var h = '<div class="card rcv">';
+    var reading = r.pages.some(function (p) { return p.status === 'reading'; });
+    var head = '🧾 Накладна' + (r.docNumber ? ' № ' + esc(r.docNumber) : '');
+    if (!r.pages.length) {
+      h += '<div><b>' + head + '</b></div><p class="hint">Сфотографуйте накладну — постачальник, назви й кількість підтягнуться з неї.</p>';
+    } else {
+      h += '<div><b>' + head + '</b></div>' + r.pages.map(function (p) {
+        var st = p.status === 'reading' ? '<span class="spinner"></span>читаю…'
+          : p.status === 'done' ? nLines(p.lines || 0) + (p.uncertain ? ', з правками: ' + p.uncertain : '')
+            : p.status === 'wait' ? '⏳ ' + esc(p.error || 'чекає звʼязку')
+              : '⚠ ' + esc(p.error || 'помилка');
+        var again = p.status === 'error' || ((p.status === 'wait' || p.status === 'reading') && !rcvPending[p.page]);
+        if (p.status === 'reading' && !rcvPending[p.page]) st = 'фото не відправлено';
+        return '<div class="small-text">Сторінка ' + p.page + ': ' + st +
+          (again ? ' <button class="btn small" data-rcvpage="' + p.page + '">📷 Ще раз</button>' : '') +
+          (p.note ? '<div class="warn-text">⚠ ' + esc(p.note) + '</div>' : '') + '</div>';
+      }).join('');
+    }
+    if (r.supplier && state.session.supplier && r.supplier.toLowerCase() !== state.session.supplier.toLowerCase()) {
+      h += '<div class="small-text">У накладній постачальник: <b>' + esc(r.supplier) + '</b> ' +
+        '<button class="btn small" data-rcv="supplier">Взяти з накладної</button></div>';
+    }
+    if (r.lines.length) {
+      var left = r.lines.filter(function (l) { return !lineTaken(l); });
+      var done = r.lines.length - left.length;
+      h += '<div class="rcv-progress"><div class="bar"><span style="width:' + Math.round(done * 100 / r.lines.length) + '%"></span></div>' +
+        '<b>Прийнято рядків: ' + done + ' з ' + r.lines.length + '</b></div>';
+      if (left.length) {
+        h += '<details><summary class="small-text">Ще не прийнято (' + left.length + ')</summary><ul class="items">' +
+          left.map(function (l) {
+            return '<li><div><div class="inv-name">' + esc(l.name) + '</div>' + (l.code ? '<div class="dates">код ' + esc(l.code) + '</div>' : '') +
+              '</div><span class="qty">' + esc(qtyText(l.qty, l.unit)) + '</span></li>';
+          }).join('') + '</ul></details>';
+      }
+    } else if (reading) {
+      h += '<p class="hint">Можна сканувати вже зараз — підказки з накладної зʼявляться, щойно ШІ її прочитає (до хвилини).</p>';
+    }
+    var next = r.pages.reduce(function (m, p) { return Math.max(m, p.page); }, 0) + 1;
+    h += '<button class="btn small" data-rcv="add">📷 ' + (r.pages.length ? 'Додати сторінку ' + next : 'Сфотографувати накладну') + '</button>';
+    h += '</div>';
+    box.innerHTML = h;
+  }
+
+  $('rcvInvoice').addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('button');
+    if (!t || !rcv()) return;
+    var r = rcv();
+    if (t.getAttribute('data-rcv') === 'add') {
+      takePhoto({ kind: 'rcvInvoice', pageNo: r.pages.reduce(function (m, p) { return Math.max(m, p.page); }, 0) + 1 });
+    } else if (t.getAttribute('data-rcv') === 'supplier') {
+      setSessionSupplier(r.supplier);
+      renderRcv();
+    } else if (t.getAttribute('data-rcvpage')) {
+      takePhoto({ kind: 'rcvInvoice', pageNo: +t.getAttribute('data-rcvpage') });
+    }
+  });
+
+  /** Картка товару при прийманні з накладною: кількість за накладною або вибір рядка. */
+  function renderRcvLine() {
+    var it = state.item, box = $('rcvLineInfo'), r = rcv();
+    if (!it || it.inv || !r) { box.hidden = true; return; }
+    box.hidden = false;
+    if (!r.lines.length) {
+      var reading = r.pages.some(function (p) { return p.status === 'reading' || p.status === 'wait'; });
+      box.innerHTML = reading ? '<div class="status wait">🧾 Накладна ще читається — кількість за накладною зʼявиться тут.</div>' : '';
+      box.hidden = !reading;
+      return;
+    }
+    if (r.picks['-' + it.barcode]) {
+      box.innerHTML = '<div class="status warn">🧾 Позначено: цього товару немає в накладній. <button class="btn small" data-rl="undo">Скасувати</button></div>';
+      return;
+    }
+    var ls = linesFor(it.barcode), h;
+    if (ls.length) {
+      var pcs = ls.every(function (l) { return isPcs(l.unit); });
+      var exp = ls.reduce(function (s, l) { return s + (Number(l.qty) || 0); }, 0);
+      var before = receivedQty(it.barcode);
+      var now = it.entries.reduce(function (s, e) { return s + (Number(e.qty) > 0 ? Number(e.qty) : 0); }, 0);
+      var total = before + now;
+      var cls = pcs && total === exp ? 'ok' : 'warn';
+      var diff = !pcs ? 'Одиниця в накладній «' + esc(ls[0].unit) + '» — порахуйте штуки в упаковці.'
+        : total === exp ? '✓ збігається' : total < exp ? 'ще ' + numText(exp - total) + ' шт до накладної' : 'більше, ніж у накладній, на ' + numText(total - exp) + ' шт';
+      var picked = ls.some(function (l) { return r.picks[l.id] === it.barcode; });
+      h = '<div class="status ' + cls + '">🧾 За накладною: <b>' + esc(pcs ? numText(exp) + ' шт' : qtyText(exp, ls[0].unit)) + '</b>' +
+        (ls.length > 1 ? ' (' + ls.length + ' ' + plural(ls.length, 'рядок', 'рядки', 'рядків') + ')' : '') +
+        '<div class="small-text">' + ls.map(function (l) { return esc(l.name); }).join(' · ') + '</div>' +
+        '<div>Прийнято: <b>' + total + ' шт</b>' + (before ? ' (раніше ' + before + ' + зараз ' + now + ')' : '') + ' — ' + diff + '</div>' +
+        (pcs && now && total < exp ? '<div class="small-text">Кілька дат? «➕ Ще одна дата цього товару» — кількість по датах складається.</div>' : '') +
+        (picked ? '<button class="btn small" data-rl="unpick">Інший рядок</button>' : '') + '</div>';
+    } else {
+      var cand = r.lines.filter(function (l) {
+        return !l.barcode && !r.picks[l.id] && !state.session.items.some(function (x) { return lineFor(l, x.barcode); });
+      });
+      if (!cand.length) {
+        h = '<div class="status warn">🧾 У накладній немає вільних рядків для цього товару — він піде в «немає в накладній».</div>';
+      } else {
+        var nm = it.known ? it.name : ($('nameInput').value || '');
+        cand = cand.map(function (l) { return { l: l, s: nameSim(nm, l.name) }; })
+          .sort(function (a, b) { return b.s - a.s || a.l.page - b.l.page || a.l.line - b.l.line; });
+        var shown = it.showAllLines ? cand : cand.slice(0, 3);
+        h = '<div class="status wait"><b>🧾 Який це рядок накладної?</b>' +
+          shown.map(function (x) {
+            return '<button class="sess-btn line-pick" data-pick="' + esc(x.l.id) + '"><span class="s-main"><span class="s-name">' + esc(x.l.name) + '</span>' +
+              (x.l.code ? '<span class="small-text"> · код ' + esc(x.l.code) + '</span>' : '') + '</span>' +
+              '<span class="qty">' + esc(qtyText(x.l.qty, x.l.unit)) + '</span></button>';
+          }).join('') +
+          '<div class="two">' + (cand.length > shown.length ? '<button class="btn small" data-rl="all">Усі рядки (' + cand.length + ')</button>' : '<span></span>') +
+          '<button class="btn small" data-rl="none">Немає в накладній</button></div></div>';
+      }
+    }
+    box.innerHTML = h;
+  }
+
+  $('rcvLineInfo').addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('button');
+    var it = state.item, r = rcv();
+    if (!t || !it || !r) return;
+    var id = t.getAttribute('data-pick'), act = t.getAttribute('data-rl');
+    if (id) {
+      r.picks[id] = it.barcode;
+      var line = r.lines.filter(function (l) { return l.id === id; })[0];
+      if (line && !it.known && !$('nameInput').value.trim()) {
+        setSuggestedName(line.name, 'invoice');
+        $('newProductHint').textContent = 'Назва з накладної. Перевірте або сфотографуйте товар.';
+      }
+    } else if (act === 'unpick') {
+      Object.keys(r.picks).forEach(function (k) { if (r.picks[k] === it.barcode) delete r.picks[k]; });
+    } else if (act === 'none') {
+      r.picks['-' + it.barcode] = '-';
+    } else if (act === 'undo') {
+      delete r.picks['-' + it.barcode];
+    } else if (act === 'all') {
+      it.showAllLines = true;
+    }
+    saveSession();
+    renderRcvLine();
+    updateSaveButton();
+  });
+
+  // ---------------------------------------------------------------------------
   // Фото: стиснення перед відправкою
   // ---------------------------------------------------------------------------
   function takePhoto(target) {
@@ -906,12 +1179,13 @@
     var file = this.files && this.files[0];
     var target = state.pendingPhoto;
     state.pendingPhoto = null;
-    if (!file || !target || (target.kind !== 'compare' && target.kind !== 'invoice' && !state.item)) return;
+    if (!file || !target || (target.kind !== 'compare' && target.kind !== 'invoice' && target.kind !== 'rcvInvoice' && !state.item)) return;
     if (target.kind === 'date' && state.item && !state.item.entries.some(function (x) { return x.id === target.entryId; })) return;
     // Накладна — дрібний текст у таблиці, тому більша роздільність.
-    var big = target.kind === 'invoice';
+    var big = target.kind === 'invoice' || target.kind === 'rcvInvoice';
     resizeImage(file, big ? 2200 : 1280, big ? 0.82 : 0.85).then(function (b64) {
       if (target.kind === 'invoice') uploadInvoicePage(target, b64);
+      else if (target.kind === 'rcvInvoice') rcvUpload(target.pageNo, b64);
       else if (target.kind === 'compare') compareModels(b64);
       else if (target.kind === 'name') recognizeName(b64);
       else recognizeDate(target.entryId, b64);
@@ -1119,7 +1393,7 @@
   // ---------------------------------------------------------------------------
   // Накладні (етап 3, D-12): фото сторінок → ШІ читає рядки → звірка з прийнятим
   // ---------------------------------------------------------------------------
-  var inv = { sessionId: '', from: '', data: null, busy: false, list: null, checked: {} };
+  var inv = { sessionId: '', from: '', data: null, busy: false, list: null, checked: {}, pendingPicks: null };
 
   function dt(iso) {
     if (!iso) return '';
@@ -1224,6 +1498,12 @@
     else if (!inv.data) setInvStatus('wait', '<span class="spinner"></span>Завантажую…');
     var sid = inv.sessionId;
     return ensureSent().then(function () {
+      // Пари, вибрані під час приймання (D-20), — до автоматичної звірки.
+      var pp = inv.pendingPicks;
+      if (pp && pp.sessionId === sid) {
+        return api('invoicePicks', { sessionId: sid, picks: pp.picks }, 60000).then(function () { inv.pendingPicks = null; });
+      }
+    }).then(function () {
       return api('invoice', { sessionId: sid, match: !!match }, 120000);
     }).then(function (r) {
       if (inv.sessionId !== sid) return;
@@ -2617,7 +2897,7 @@
     if (id === 'scrScan' && !state.item) startScannerWhenVisible();
   };
 
-  window.addEventListener('online', function () { updateNet(); flushQueue(); });
+  window.addEventListener('online', function () { updateNet(); flushQueue().then(rcvRetry); });
   window.addEventListener('offline', updateNet);
   setInterval(function () { flushQueue(); }, 30000);
   document.addEventListener('visibilitychange', function () {
